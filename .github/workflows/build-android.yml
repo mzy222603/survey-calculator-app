@@ -16,7 +16,7 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '18.19.0'
 
     - name: Setup Java JDK
       uses: actions/setup-java@v4
@@ -24,11 +24,16 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
+    - name: Clear npm cache
+      run: npm cache clean --force
+
     - name: Install dependencies
-      run: npm install --legacy-peer-deps
+      run: |
+        rm -rf node_modules package-lock.json
+        npm install --legacy-peer-deps
 
     - name: Build React app
-      run: npm run build
+      run: CI=false npm run build
 
     - name: Sync Capacitor
       run: npx cap sync android
@@ -39,7 +44,7 @@ jobs:
     - name: Build Debug APK
       run: |
         cd android
-        ./gradlew assembleDebug --no-daemon --stacktrace
+        ./gradlew assembleDebug --no-daemon
 
     - name: Upload APK artifact
       uses: actions/upload-artifact@v4
