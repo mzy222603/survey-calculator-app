@@ -190,79 +190,98 @@ function App() {
   const memSub = () => { vibrate(); setMemory(memory - parseFloat(display) || 0); setHasMemory(true); };
 
   // 度分秒转换功能
+  // 十进制度 → 度分秒
   const deg2dms = () => {
     vibrate();
     try {
       const deg = parseFloat(display);
+      if (isNaN(deg)) { setDisplay('Error'); return; }
       const sign = deg < 0 ? -1 : 1;
       const absDeg = Math.abs(deg);
       const d = Math.floor(absDeg);
       const mFloat = (absDeg - d) * 60;
       const m = Math.floor(mFloat);
       const s = (mFloat - m) * 60;
+      // 显示格式: 30°15'20.1234"
       const result = `${sign < 0 ? '-' : ''}${d}°${m}'${s.toFixed(4)}"`;
-      saveToHistory(`DEG→DMS(${display})`, result);
+      saveToHistory(`D→DMS(${display})`, result);
       setDisplay(result);
     } catch { setDisplay('Error'); }
   };
 
+  // 度分秒 → 十进制度
   const dms2deg = () => {
     vibrate();
     try {
-      // 支持格式: 30°15'20.5" 或 30.1520 (度.分秒)
-      const input = display;
+      const input = display.trim();
       let deg = 0;
-      if (input.includes('°') || input.includes("'") || input.includes('"')) {
-        const match = input.match(/(-?)([\d.]+)°([\d.]+)'([\d.]+)"?/);
-        if (match) {
-          const sign = match[1] === '-' ? -1 : 1;
-          const d = parseFloat(match[2]);
-          const m = parseFloat(match[3]);
-          const s = parseFloat(match[4]);
-          deg = sign * (d + m / 60 + s / 3600);
-        }
-      } else {
-        // 格式: 30.1520 表示30°15'20"
+      
+      // 格式1: 30°15'20.5" 或 30°15'20.5 或 30°15' 或 30°
+      if (input.includes('°')) {
+        const parts = input.replace(/['"′″]/g, ' ').replace('°', ' ').trim().split(/\s+/);
+        const sign = input.startsWith('-') ? -1 : 1;
+        const d = Math.abs(parseFloat(parts[0])) || 0;
+        const m = parseFloat(parts[1]) || 0;
+        const s = parseFloat(parts[2]) || 0;
+        deg = sign * (d + m / 60 + s / 3600);
+      }
+      // 格式2: 30.1520 表示 30°15'20" (DD.MMSS格式)
+      else if (/^-?\d+\.\d{4,}$/.test(input)) {
         const val = parseFloat(input);
         const sign = val < 0 ? -1 : 1;
         const absVal = Math.abs(val);
         const d = Math.floor(absVal);
-        const mmss = (absVal - d) * 100;
-        const m = Math.floor(mmss);
-        const s = (mmss - m) * 100;
-        deg = sign * (d + m / 60 + s / 3600);
+        const decimal = absVal - d;
+        const mm = Math.floor(decimal * 100);
+        const ss = (decimal * 100 - mm) * 100;
+        deg = sign * (d + mm / 60 + ss / 3600);
       }
+      // 格式3: 纯数字，直接当作度
+      else {
+        deg = parseFloat(input);
+      }
+      
+      if (isNaN(deg)) { setDisplay('Error'); return; }
       const result = deg.toFixed(8);
-      saveToHistory(`DMS→DEG(${display})`, result);
+      saveToHistory(`DMS→D(${display})`, result);
       setDisplay(result);
     } catch { setDisplay('Error'); }
   };
 
+  // 弧度 → 度
   const rad2deg = () => {
     vibrate();
     try {
       const rad = parseFloat(display);
+      if (isNaN(rad)) { setDisplay('Error'); return; }
       const deg = rad * 180 / Math.PI;
       const result = deg.toFixed(8);
-      saveToHistory(`RAD→DEG(${display})`, result);
+      saveToHistory(`R→D(${display})`, result);
       setDisplay(result);
     } catch { setDisplay('Error'); }
   };
 
+  // 度 → 弧度
   const deg2rad = () => {
     vibrate();
     try {
       const deg = parseFloat(display);
+      if (isNaN(deg)) { setDisplay('Error'); return; }
       const rad = deg * Math.PI / 180;
       const result = rad.toFixed(8);
-      saveToHistory(`DEG→RAD(${display})`, result);
+      saveToHistory(`D→R(${display})`, result);
       setDisplay(result);
     } catch { setDisplay('Error'); }
   };
 
+  // 插入度分秒符号
   const insertDMS = (symbol: string) => {
     vibrate();
-    setDisplay(display === '0' || display === 'Error' ? symbol : display + symbol);
+    if (display === '0' || display === 'Error') {
+      setDisplay(symbol);
+    } else {
+      setDisplay(display + symbol);
+    }
   };
 
   // ==================== 测绘计算 ====================
