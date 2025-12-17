@@ -3,8 +3,6 @@ name: Build Android APK
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -18,7 +16,7 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
+        node-version: '18'
 
     - name: Setup Java JDK
       uses: actions/setup-java@v4
@@ -26,17 +24,21 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
-
     - name: Install dependencies
       run: npm install --legacy-peer-deps
+
+    - name: Install Capacitor CLI
+      run: npm install -g @capacitor/cli
 
     - name: Build React app
       run: npm run build
 
-    - name: Sync Capacitor
-      run: npx cap sync android
+    - name: Copy build to android
+      run: npx cap copy android
+
+    - name: Update android project
+      run: npx cap update android
+      continue-on-error: true
 
     - name: Grant execute permission for gradlew
       run: chmod +x android/gradlew
@@ -44,7 +46,7 @@ jobs:
     - name: Build Debug APK
       run: |
         cd android
-        ./gradlew assembleDebug
+        ./gradlew assembleDebug --no-daemon
 
     - name: Upload APK artifact
       uses: actions/upload-artifact@v4
@@ -52,43 +54,3 @@ jobs:
         name: survey-calculator-debug
         path: android/app/build/outputs/apk/debug/app-debug.apk
         retention-days: 30
-
-    - name: Build Release APK (unsigned)
-      run: |
-        cd android
-        ./gradlew assembleRelease
-
-    - name: Upload Release APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: survey-calculator-release
-        path: android/app/build/outputs/apk/release/app-release-unsigned.apk
-        retention-days: 30
-
-    - name: Create Release
-      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: v1.0.${{ github.run_number }}
-        name: Release v1.0.${{ github.run_number }}
-        body: |
-          ## 测绘计算器 APK
-          
-          自动构建版本 v1.0.${{ github.run_number }}
-          
-          ### 功能特性
-          - 科学计算器（三角函数、对数、指数等）
-          - 测绘计算（坐标正反算、交会计算、导线平差等）
-          - 统计分析（描述统计、回归分析）
-          - 矩阵运算（行列式、逆矩阵、特征值等）
-          - 完全离线运行
-          
-          ### 安装说明
-          下载 `app-debug.apk` 文件，传输到手机安装即可。
-        files: |
-          android/app/build/outputs/apk/debug/app-debug.apk
-          android/app/build/outputs/apk/release/app-release-unsigned.apk
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
