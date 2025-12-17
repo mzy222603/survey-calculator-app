@@ -16,7 +16,7 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '22'
+        node-version: '18'
 
     - name: Setup Java JDK
       uses: actions/setup-java@v4
@@ -27,18 +27,11 @@ jobs:
     - name: Install dependencies
       run: npm install --legacy-peer-deps
 
-    - name: Install Capacitor CLI
-      run: npm install -g @capacitor/cli
-
     - name: Build React app
       run: npm run build
 
-    - name: Copy build to android
-      run: npx cap copy android
-
-    - name: Update android project
-      run: npx cap update android
-      continue-on-error: true
+    - name: Sync Capacitor
+      run: npx cap sync android
 
     - name: Grant execute permission for gradlew
       run: chmod +x android/gradlew
@@ -46,7 +39,7 @@ jobs:
     - name: Build Debug APK
       run: |
         cd android
-        ./gradlew assembleDebug --no-daemon
+        ./gradlew assembleDebug --no-daemon --stacktrace
 
     - name: Upload APK artifact
       uses: actions/upload-artifact@v4
