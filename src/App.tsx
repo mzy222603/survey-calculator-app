@@ -45,13 +45,16 @@ const Themes: {[k:string]:{name:string;bg:string;card:string;primary:string;text
 
 // ==================== 测绘计算引擎 ====================
 // 椭球参数
+// 标准椭球参数（使用国际标准精确值）
+// 北京54使用克拉索夫斯基椭球: a=6378245m, b=6356863.0188m
 const Ellipsoids: {[k:string]:{a:number;f:number;name:string}} = {
   'CGCS2000': { a: 6378137.0, f: 1/298.257222101, name: 'CGCS2000/国家大地坐标系' },
   'WGS84': { a: 6378137.0, f: 1/298.257223563, name: 'WGS84/GPS' },
-  'BJ54': { a: 6378245.0, f: 1/298.3, name: '北京54' },
-  'XIAN80': { a: 6378140.0, f: 1/298.257, name: '西安80' },
-  'KRASOVSKY': { a: 6378245.0, f: 1/298.3, name: '克拉索夫斯基' },
-  'GRS80': { a: 6378137.0, f: 1/298.257222101, name: 'GRS80' }
+  'BJ54': { a: 6378245.0, f: (6378245.0-6356863.0188)/6378245.0, name: '北京54(克拉索夫斯基)' },  // 用短半轴定义更精确
+  'XIAN80': { a: 6378140.0, f: 1/298.257, name: '西安80(IAG75)' },
+  'KRASOVSKY': { a: 6378245.0, f: (6378245.0-6356863.0188)/6378245.0, name: '克拉索夫斯基' },
+  'GRS80': { a: 6378137.0, f: 1/298.257222101, name: 'GRS80' },
+  'CUSTOM': { a: 6378137.0, f: 1/298.257, name: '自定义椭球' }  // 可自定义
 };
 
 // ==================== 通用角度解析函数 ====================
@@ -1036,28 +1039,40 @@ function App() {
         case 'gauss_proj': {
           const zw = inputs['gpzw'] === '3' ? 3 : 6;
           const ellip = inputs['gpellip'] || 'CGCS2000';
+          const ep = Ellipsoids[ellip];
           const B = getAngle('gpB'), L = getAngle('gpL');
           const g = Survey.gaussProj(B, L, zw as 3|6, getAngle('gpL0')||undefined, ellip);
-          r = '【高斯投影结果】\n\n椭球: ' + (Ellipsoids[ellip]?.name || ellip) + '\n带宽: ' + zw + '°\n\n输入:\nB = ' + (inputs['gpB']||'0') + ' (解析: ' + fmt(B) + '°)\nL = ' + (inputs['gpL']||'0') + ' (解析: ' + fmt(L) + '°)\n\n输出:\nX = ' + fmt(g.x) + ' m\nY = ' + fmt(g.y) + ' m\n带号 = ' + g.zone + '\n中央子午线 = ' + g.cm + '°';
+          r = '【高斯投影结果】\n\n椭球: ' + (ep?.name || ellip) + '\na = ' + ep.a.toFixed(3) + ' m\n1/f = ' + (1/ep.f).toFixed(7) + '\n带宽: ' + zw + '°\n\n输入:\nB = ' + (inputs['gpB']||'0') + ' (解析: ' + fmt(B) + '°)\nL = ' + (inputs['gpL']||'0') + ' (解析: ' + fmt(L) + '°)\n\n输出:\nX = ' + fmt(g.x) + ' m\nY = ' + fmt(g.y) + ' m\n带号 = ' + g.zone + '\n中央子午线 = ' + g.cm + '°';
           break;
         }
         case 'utm': {
           const ellip = inputs['utmellip'] || 'WGS84';
+          const ep = Ellipsoids[ellip];
           const B = getAngle('utmB'), L = getAngle('utmL');
           const u = Survey.utm(B, L, ellip);
-          r = '【UTM投影结果】\n\n椭球: ' + (Ellipsoids[ellip]?.name || ellip) + '\n\n输入:\nB = ' + (inputs['utmB']||'0') + ' (解析: ' + fmt(B) + '°)\nL = ' + (inputs['utmL']||'0') + ' (解析: ' + fmt(L) + '°)\n\n输出:\nN(X) = ' + fmt(u.x) + ' m\nE(Y) = ' + fmt(u.y) + ' m\n带号 = ' + u.zone + u.hemisphere + '\n中央子午线 = ' + u.cm + '°';
+          r = '【UTM投影结果】\n\n椭球: ' + (ep?.name || ellip) + '\na = ' + ep.a.toFixed(3) + ' m\n1/f = ' + (1/ep.f).toFixed(7) + '\n\n输入:\nB = ' + (inputs['utmB']||'0') + ' (解析: ' + fmt(B) + '°)\nL = ' + (inputs['utmL']||'0') + ' (解析: ' + fmt(L) + '°)\n\n输出:\nN(X) = ' + fmt(u.x) + ' m\nE(Y) = ' + fmt(u.y) + ' m\n带号 = ' + u.zone + u.hemisphere + '\n中央子午线 = ' + u.cm + '°';
           break;
         }
         case 'blh_xyz': {
           const mode = inputs['blhmode'] || 'blh2xyz';
-          const ellip = inputs['blhellip'] || 'CGCS2000';
+          let ellip = inputs['blhellip'] || 'CGCS2000';
+          let ellipName = Ellipsoids[ellip]?.name || ellip;
+          // 支持自定义椭球参数
+          if (ellip === 'CUSTOM') {
+            const custA = parseFloat(inputs['custA'] || '6378245');
+            const custF = parseFloat(inputs['custF'] || '298.3');
+            Ellipsoids['CUSTOM'] = { a: custA, f: 1/custF, name: `自定义(a=${custA}, 1/f=${custF})` };
+            ellipName = Ellipsoids['CUSTOM'].name;
+          }
           if (mode === 'blh2xyz') {
             const B = getAngle('blhB'), L = getAngle('blhL'), H = getN('blhH');
             const xyz = Survey.blhToXyz(B, L, H, ellip);
-            r = '【BLH→XYZ转换】\n\n椭球: ' + (Ellipsoids[ellip]?.name || ellip) + '\n\n输入(大地坐标):\nB = ' + (inputs['blhB']||'0') + ' (解析: ' + fmt(B) + '°)\nL = ' + (inputs['blhL']||'0') + ' (解析: ' + fmt(L) + '°)\nH = ' + fmt(H) + ' m\n\n输出(空间直角坐标):\nX = ' + fmt(xyz.X) + ' m\nY = ' + fmt(xyz.Y) + ' m\nZ = ' + fmt(xyz.Z) + ' m';
+            const ep = Ellipsoids[ellip];
+            r = '【BLH→XYZ转换】\n\n椭球: ' + ellipName + '\na = ' + ep.a.toFixed(3) + ' m\n1/f = ' + (1/ep.f).toFixed(7) + '\n\n输入(大地坐标):\nB = ' + (inputs['blhB']||'0') + ' (解析: ' + fmt(B) + '°)\nL = ' + (inputs['blhL']||'0') + ' (解析: ' + fmt(L) + '°)\nH = ' + fmt(H) + ' m\n\n输出(空间直角坐标):\nX = ' + fmt(xyz.X) + ' m\nY = ' + fmt(xyz.Y) + ' m\nZ = ' + fmt(xyz.Z) + ' m';
           } else {
             const blh = Survey.xyzToBlh(getN('xyzX'), getN('xyzY'), getN('xyzZ'), ellip);
-            r = '【XYZ→BLH转换】\n\n椭球: ' + (Ellipsoids[ellip]?.name || ellip) + '\n\n输入(空间直角坐标):\nX = ' + fmt(getN('xyzX')) + ' m\nY = ' + fmt(getN('xyzY')) + ' m\nZ = ' + fmt(getN('xyzZ')) + ' m\n\n输出(大地坐标):\nB = ' + fmt(blh.B) + '° (' + Survey.formatDms(blh.B) + ')\nL = ' + fmt(blh.L) + '° (' + Survey.formatDms(blh.L) + ')\nH = ' + fmt(blh.H) + ' m';
+            const ep = Ellipsoids[ellip];
+            r = '【XYZ→BLH转换】\n\n椭球: ' + ellipName + '\na = ' + ep.a.toFixed(3) + ' m\n1/f = ' + (1/ep.f).toFixed(7) + '\n\n输入(空间直角坐标):\nX = ' + fmt(getN('xyzX')) + ' m\nY = ' + fmt(getN('xyzY')) + ' m\nZ = ' + fmt(getN('xyzZ')) + ' m\n\n输出(大地坐标):\nB = ' + fmt(blh.B) + '° (' + Survey.formatDms(blh.B) + ')\nL = ' + fmt(blh.L) + '° (' + Survey.formatDms(blh.L) + ')\nH = ' + fmt(blh.H) + ' m';
           }
           break;
         }
@@ -1225,7 +1240,7 @@ function App() {
       case 'utm':
         return <><div className="select-row"><label>椭球</label><select value={inputs['utmellip']||'WGS84'} onChange={e=>handleInputChange('utmellip',e.target.value)}><option value="WGS84">WGS84</option><option value="CGCS2000">CGCS2000</option></select></div><InputField label="纬度B" k="utmB" value={inputs['utmB']||''} onChange={handleInputChange} placeholder="如 30:30:00 或 30.5"/><InputField label="经度L" k="utmL" value={inputs['utmL']||''} onChange={handleInputChange} placeholder="如 114:18:00 或 114.3"/></>;
       case 'blh_xyz':
-        return <><div className="select-row"><label>椭球</label><select value={inputs['blhellip']||'CGCS2000'} onChange={e=>handleInputChange('blhellip',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="WGS84">WGS84</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option></select></div><div className="select-row"><label>转换方向</label><select value={inputs['blhmode']||'blh2xyz'} onChange={e=>handleInputChange('blhmode',e.target.value)}><option value="blh2xyz">BLH→XYZ</option><option value="xyz2blh">XYZ→BLH</option></select></div>{(inputs['blhmode']||'blh2xyz')==='blh2xyz'?<><InputField label="纬度B" k="blhB" value={inputs['blhB']||''} onChange={handleInputChange} placeholder="如 29:33:28.83 或 29.558"/><InputField label="经度L" k="blhL" value={inputs['blhL']||''} onChange={handleInputChange} placeholder="如 119:25:44.4 或 119.429"/><InputField label="大地高H(m)" k="blhH" value={inputs['blhH']||''} onChange={handleInputChange} placeholder="如 67.789"/></>:<><InputField label="X(m)" k="xyzX" value={inputs['xyzX']||''} onChange={handleInputChange}/><InputField label="Y(m)" k="xyzY" value={inputs['xyzY']||''} onChange={handleInputChange}/><InputField label="Z(m)" k="xyzZ" value={inputs['xyzZ']||''} onChange={handleInputChange}/></>}</>;
+        return <><div className="select-row"><label>椭球</label><select value={inputs['blhellip']||'CGCS2000'} onChange={e=>handleInputChange('blhellip',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="WGS84">WGS84</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option><option value="KRASOVSKY">克拉索夫斯基</option><option value="GRS80">GRS80</option><option value="CUSTOM">自定义参数</option></select></div>{(inputs['blhellip']==='CUSTOM')&&<><InputField label="长半轴a(m)" k="custA" value={inputs['custA']||'6378245'} onChange={handleInputChange} placeholder="如 6378245"/><InputField label="扁率1/f" k="custF" value={inputs['custF']||'298.3'} onChange={handleInputChange} placeholder="如 298.3"/></>}<div className="select-row"><label>转换方向</label><select value={inputs['blhmode']||'blh2xyz'} onChange={e=>handleInputChange('blhmode',e.target.value)}><option value="blh2xyz">BLH→XYZ</option><option value="xyz2blh">XYZ→BLH</option></select></div>{(inputs['blhmode']||'blh2xyz')==='blh2xyz'?<><InputField label="纬度B" k="blhB" value={inputs['blhB']||''} onChange={handleInputChange} placeholder="如 29:33:28.83 或 29.558"/><InputField label="经度L" k="blhL" value={inputs['blhL']||''} onChange={handleInputChange} placeholder="如 119:25:44.4 或 119.429"/><InputField label="大地高H(m)" k="blhH" value={inputs['blhH']||''} onChange={handleInputChange} placeholder="如 67.789"/></>:<><InputField label="X(m)" k="xyzX" value={inputs['xyzX']||''} onChange={handleInputChange}/><InputField label="Y(m)" k="xyzY" value={inputs['xyzY']||''} onChange={handleInputChange}/><InputField label="Z(m)" k="xyzZ" value={inputs['xyzZ']||''} onChange={handleInputChange}/></>}</>;
       case 'transform7':
         return <><div className="select-row"><label>模式</label><select value={inputs['t7mode']||'calc'} onChange={e=>handleInputChange('t7mode',e.target.value)}><option value="calc">参数求解</option><option value="apply">参数转换</option></select></div>{(inputs['t7mode']||'calc')==='calc'?<><div className="transform-header">公共点坐标（至少3个）- 空间直角坐标</div><div className="table-header"><span>点</span><span>源X</span><span>源Y</span><span>源Z</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t7sX${i}`]||''} onChange={e=>handleInputChange(`t7sX${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`t7sY${i}`]||''} onChange={e=>handleInputChange(`t7sY${i}`,e.target.value)} placeholder="Y"/><input type="text" inputMode="decimal" value={inputs[`t7sZ${i}`]||''} onChange={e=>handleInputChange(`t7sZ${i}`,e.target.value)} placeholder="Z"/></div>)}<div className="table-header"><span>点</span><span>目X</span><span>目Y</span><span>目Z</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t7tX${i}`]||''} onChange={e=>handleInputChange(`t7tX${i}`,e.target.value)} placeholder="X'"/><input type="text" inputMode="decimal" value={inputs[`t7tY${i}`]||''} onChange={e=>handleInputChange(`t7tY${i}`,e.target.value)} placeholder="Y'"/><input type="text" inputMode="decimal" value={inputs[`t7tZ${i}`]||''} onChange={e=>handleInputChange(`t7tZ${i}`,e.target.value)} placeholder="Z'"/></div>)}</>:<><div className="transform-header">布尔萨七参数</div><InputField label="ΔX(m)" k="t7dx" value={inputs['t7dx']||''} onChange={handleInputChange}/><InputField label="ΔY(m)" k="t7dy" value={inputs['t7dy']||''} onChange={handleInputChange}/><InputField label="ΔZ(m)" k="t7dz" value={inputs['t7dz']||''} onChange={handleInputChange}/><InputField label="εx(角秒)" k="t7rx" value={inputs['t7rx']||''} onChange={handleInputChange}/><InputField label="εy(角秒)" k="t7ry" value={inputs['t7ry']||''} onChange={handleInputChange}/><InputField label="εz(角秒)" k="t7rz" value={inputs['t7rz']||''} onChange={handleInputChange}/><InputField label="m(ppm)" k="t7m" value={inputs['t7m']||''} onChange={handleInputChange}/><div className="transform-header">待转换点</div><InputField label="X(m)" k="t7X" value={inputs['t7X']||''} onChange={handleInputChange}/><InputField label="Y(m)" k="t7Y" value={inputs['t7Y']||''} onChange={handleInputChange}/><InputField label="Z(m)" k="t7Z" value={inputs['t7Z']||''} onChange={handleInputChange}/></>}</>;
       case 'coord_sys':
@@ -1485,7 +1500,7 @@ function App() {
               <button className="toggle on" style={{background: currentTheme.primary}} onClick={()=>setTab('help')}>查看</button>
             </div>
             <div className="about">
-              <p>测绘计算器Pro v3.4</p>
+              <p>测绘计算器Pro v3.5</p>
               <p>专业测绘计算解决方案</p>
             </div>
           </div>
