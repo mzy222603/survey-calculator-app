@@ -511,7 +511,7 @@ function App() {
   const [historyFilter, setHistoryFilter] = useState<'all'|'calc'|'survey'>('all');
   const [mem, setMem] = useState(0);
   const [hasMem, setHasMem] = useState(false);
-  const [angleUnit, setAngleUnit] = useState<'DEG'|'RAD'|'GRAD'>('DEG');
+  const [angleUnit, setAngleUnit] = useState<'度'|'弧度'|'梯度'>('度');
   const [precision, setPrecision] = useState(6);
   const [vibration, setVibration] = useState(true);
   const [theme, setTheme] = useState<string>('dark');
@@ -600,12 +600,12 @@ function App() {
       let e = display
         .replace(/×/g,'*').replace(/÷/g,'/').replace(/π/g,`(${Math.PI})`).replace(/\^/g,'**')
         .replace(/√\(/g,'Math.sqrt(').replace(/∛\(/g,'Math.cbrt(')
-        .replace(/sin\(/g,`Math.sin(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''})`)
-        .replace(/cos\(/g,`Math.cos(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''})`)
-        .replace(/tan\(/g,`Math.tan(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''})`)
-        .replace(/asin\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.asin()`)
-        .replace(/acos\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.acos()`)
-        .replace(/atan\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.atan()`)
+        .replace(/sin\(/g,`Math.sin(${angleUnit==='度'?'Math.PI/180*':angleUnit==='梯度'?'Math.PI/200*':''})`)
+        .replace(/cos\(/g,`Math.cos(${angleUnit==='度'?'Math.PI/180*':angleUnit==='梯度'?'Math.PI/200*':''})`)
+        .replace(/tan\(/g,`Math.tan(${angleUnit==='度'?'Math.PI/180*':angleUnit==='梯度'?'Math.PI/200*':''})`)
+        .replace(/asin\(/g,`(${angleUnit==='度'?'180/Math.PI*':angleUnit==='梯度'?'200/Math.PI*':''}Math.asin()`)
+        .replace(/acos\(/g,`(${angleUnit==='度'?'180/Math.PI*':angleUnit==='梯度'?'200/Math.PI*':''}Math.acos()`)
+        .replace(/atan\(/g,`(${angleUnit==='度'?'180/Math.PI*':angleUnit==='梯度'?'200/Math.PI*':''}Math.atan()`)
         .replace(/ln\(/g,'Math.log(').replace(/log\(/g,'Math.log10(')
         .replace(/abs\(/g,'Math.abs(').replace(/exp\(/g,'Math.exp(');
       const r = eval(e);
@@ -622,8 +622,8 @@ function App() {
     try {
       const v = parseFloat(display);
       let r: number;
-      const toRad = angleUnit==='DEG' ? Math.PI/180 : angleUnit==='GRAD' ? Math.PI/200 : 1;
-      const toDeg = angleUnit==='DEG' ? 180/Math.PI : angleUnit==='GRAD' ? 200/Math.PI : 1;
+      const toRad = angleUnit==='度' ? Math.PI/180 : angleUnit==='梯度' ? Math.PI/200 : 1;
+      const toDeg = angleUnit==='度' ? 180/Math.PI : angleUnit==='梯度' ? 200/Math.PI : 1;
       switch(fn) {
         case 'sin': r = Math.sin(v*toRad); break;
         case 'cos': r = Math.cos(v*toRad); break;
@@ -677,8 +677,8 @@ function App() {
       const m = Math.floor(mf);
       const s = (mf-m)*60;
       const r = `${sign}${d}°${m}'${s.toFixed(4)}"`;
-      setExpr(`D→DMS(${display}) =`);
-      saveCalcHistory(`D→DMS(${display})`, r);
+      setExpr(`度→度分秒(${display}) =`);
+      saveCalcHistory(`度→度分秒(${display})`, r);
       setDisplay(r);
     } catch { setDisplay('Error'); }
   };
@@ -708,14 +708,14 @@ function App() {
         deg = parseFloat(inp);
       }
       const r = fmt(deg);
-      setExpr(`DMS→D(${display}) =`);
-      saveCalcHistory(`DMS→D(${display})`, r);
+      setExpr(`度分秒→度(${display}) =`);
+      saveCalcHistory(`度分秒→度(${display})`, r);
       setDisplay(r);
     } catch { setDisplay('Error'); }
   };
     
-  const deg2rad = () => { vibrate(); try { const r = fmt(parseFloat(display)*Math.PI/180); setExpr(`D→R(${display}) =`); saveCalcHistory(`D→R(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
-  const rad2deg = () => { vibrate(); try { const r = fmt(parseFloat(display)*180/Math.PI); setExpr(`R→D(${display}) =`); saveCalcHistory(`R→D(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
+  const deg2rad = () => { vibrate(); try { const r = fmt(parseFloat(display)*Math.PI/180); setExpr(`度→弧度(${display}) =`); saveCalcHistory(`度→弧度(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
+  const rad2deg = () => { vibrate(); try { const r = fmt(parseFloat(display)*180/Math.PI); setExpr(`弧度→度(${display}) =`); saveCalcHistory(`弧度→度(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
   
   // 内存
   const mc = () => { vibrate(); setMem(0); setHasMem(false); };
@@ -1138,7 +1138,7 @@ function App() {
               <div className="expression" style={{color: currentTheme.text, opacity: 0.6}}>{expr}</div>
               <div className="display" style={{color: currentTheme.text}}>{display}</div>
               <div className="status-bar">
-                <span className={hasMem ? 'active' : ''} style={{color: hasMem ? currentTheme.primary : undefined}}>M</span>
+                <span className={hasMem ? 'active' : ''} style={{color: hasMem ? currentTheme.primary : undefined}}>有存储</span>
                 <span style={{color: currentTheme.primary}}>{angleUnit}</span>
               </div>
             </div>
@@ -1172,18 +1172,18 @@ function App() {
                 <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('10ˣ')}>10ˣ</button>
               </div>
               <div className="sci-row">
-                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={deg2dms}>D→DMS</button>
-                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={dms2deg}>DMS→D</button>
-                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={deg2rad}>D→R</button>
-                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={rad2deg}>R→D</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={deg2dms}>度→度分秒</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={dms2deg}>度分秒→度</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={deg2rad}>度→弧度</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={rad2deg}>弧度→度</button>
                 <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append('°')}>°</button>
               </div>
               <div className="sci-row">
-                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mc}>MC</button>
-                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mr}>MR</button>
-                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mAdd}>M+</button>
-                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mSub}>M-</button>
-                <button style={{background: currentTheme.primary, color: '#fff', borderColor: currentTheme.border}} onClick={()=>setAngleUnit(angleUnit==='DEG'?'RAD':angleUnit==='RAD'?'GRAD':'DEG')}>{angleUnit}</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mc}>清存</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mr}>取存</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mAdd}>存+</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mSub}>存-</button>
+                <button style={{background: currentTheme.primary, color: '#fff', borderColor: currentTheme.border}} onClick={()=>setAngleUnit(angleUnit==='度'?'弧度':angleUnit==='弧度'?'梯度':'度')}>{angleUnit}</button>
               </div>
               <div className="sci-row">
                 <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append('π')}>π</button>
@@ -1195,9 +1195,9 @@ function App() {
             </div>
             <div className="num-panel">
               <div className="num-row">
-                <button className="func" style={{background: currentTheme.card, color: '#f78166'}} onClick={clear}>C</button>
-                <button className="func" style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>setDisplay('0')}>CE</button>
-                <button className="func" style={{background: currentTheme.card, color: currentTheme.text}} onClick={back}>⌫</button>
+                <button className="func" style={{background: currentTheme.card, color: '#f78166'}} onClick={clear}>清空</button>
+                <button className="func" style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>setDisplay('0')}>清除</button>
+                <button className="func" style={{background: currentTheme.card, color: currentTheme.text}} onClick={back}>退格</button>
                 <button className="op" style={{background: currentTheme.primary}} onClick={()=>append('÷')}>÷</button>
               </div>
               <div className="num-row">
@@ -1268,9 +1268,9 @@ function App() {
             <div className="setting-item">
               <span>角度单位</span>
               <select value={angleUnit} onChange={e=>setAngleUnit(e.target.value as any)}>
-                <option value="DEG">度 (DEG)</option>
-                <option value="RAD">弧度 (RAD)</option>
-                <option value="GRAD">梯度 (GRAD)</option>
+                <option value="度">度</option>
+                <option value="弧度">弧度</option>
+                <option value="梯度">梯度</option>
               </select>
             </div>
             <div className="setting-item">
@@ -1309,7 +1309,7 @@ function App() {
               <button className="toggle on" style={{background: currentTheme.primary}} onClick={()=>setTab('help')}>查看</button>
             </div>
             <div className="about">
-              <p>测绘计算器Pro v3.0</p>
+              <p>测绘计算器Pro v3.2</p>
               <p>专业测绘计算解决方案</p>
             </div>
           </div>
