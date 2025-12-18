@@ -1,10 +1,27 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import './App.css';
 
 // 类型定义
 interface Point { x: number; y: number; z?: number; name?: string; }
-interface HistoryItem { expression: string; result: string; time: number; }
+interface HistoryItem { 
+  expression: string; 
+  result: string; 
+  time: number; 
+  category: 'calc' | 'survey'; 
+  surveyType?: string;
+  inputs?: {[k:string]:string};
+}
 interface TraverseStation { angle: number; distance: number; }
+
+// 主题配色
+const Themes: {[k:string]:{name:string;bg:string;card:string;primary:string;text:string;border:string}} = {
+  'dark': { name: '深色', bg: '#0d1117', card: '#161b22', primary: '#238636', text: '#e6edf3', border: '#30363d' },
+  'light': { name: '浅色', bg: '#f6f8fa', card: '#ffffff', primary: '#1a7f37', text: '#24292f', border: '#d0d7de' },
+  'blue': { name: '蓝色', bg: '#0a1628', card: '#0f2744', primary: '#1f6feb', text: '#c9d1d9', border: '#21436d' },
+  'green': { name: '绿色', bg: '#0d1810', card: '#132318', primary: '#2ea043', text: '#c5d9c8', border: '#1f3d25' },
+  'purple': { name: '紫色', bg: '#150d1e', card: '#1c1329', primary: '#8957e5', text: '#d2c9e0', border: '#3d2a5c' },
+  'orange': { name: '橙色', bg: '#1a1008', card: '#241a10', primary: '#d29922', text: '#e0d4c0', border: '#4a3520' }
+};
 
 // ==================== 测绘计算引擎 ====================
 // 椭球参数
@@ -466,70 +483,116 @@ const Survey = {
 
 // ==================== 主应用 ====================
 function App() {
-  const [tab, setTab] = useState<'home'|'calc'|'survey'|'settings'>('home');
+  const [tab, setTab] = useState<'home'|'calc'|'survey'|'settings'|'help'>('home');
   const [display, setDisplay] = useState('0');
   const [expr, setExpr] = useState('');
+  const [calcExpr, setCalcExpr] = useState('');
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyFilter, setHistoryFilter] = useState<'all'|'calc'|'survey'>('all');
   const [mem, setMem] = useState(0);
   const [hasMem, setHasMem] = useState(false);
   const [angleUnit, setAngleUnit] = useState<'DEG'|'RAD'|'GRAD'>('DEG');
   const [precision, setPrecision] = useState(6);
   const [vibration, setVibration] = useState(true);
-  const [theme, setTheme] = useState<'dark'|'light'>('dark');
+  const [theme, setTheme] = useState<string>('dark');
+  const inputRef = useRef<HTMLInputElement>(null);
   
   // 测绘计算状态
   const [surveyType, setSurveyType] = useState('forward');
   const [inputs, setInputs] = useState<{[k:string]:string}>({});
   const [result, setResult] = useState('');
   
+  // 获取当前主题配色
+  const currentTheme = Themes[theme] || Themes['dark'];
+  
   useEffect(() => {
     const saved = localStorage.getItem('survey_history');
     if(saved) setHistory(JSON.parse(saved));
+    const savedTheme = localStorage.getItem('survey_theme');
+    if(savedTheme) setTheme(savedTheme);
   }, []);
   
+  // 应用主题色
+  useEffect(() => {
+    document.documentElement.style.setProperty('--bg-color', currentTheme.bg);
+    document.documentElement.style.setProperty('--card-color', currentTheme.card);
+    document.documentElement.style.setProperty('--primary-color', currentTheme.primary);
+    document.documentElement.style.setProperty('--text-color', currentTheme.text);
+    document.documentElement.style.setProperty('--border-color', currentTheme.border);
+  }, [currentTheme]);
+  
   const vibrate = useCallback(() => {
-    if(vibration && navigator.vibrate) navigator.vibrate(10);
+    if(vibration && navigator.vibrate) navigator.vibrate(15);
   }, [vibration]);
   
   const fmt = (n: number) => n.toFixed(precision);
   
-  const saveHistory = (e: string, r: string) => {
-    const item = { expression: e, result: r, time: Date.now() };
+  const saveCalcHistory = (e: string, r: string) => {
+    const item: HistoryItem = { expression: e, result: r, time: Date.now(), category: 'calc' };
     const h = [item, ...history].slice(0, 100);
     setHistory(h);
     localStorage.setItem('survey_history', JSON.stringify(h));
   };
   
+  const saveSurveyHistory = (e: string, r: string) => {
+    const item: HistoryItem = { expression: e, result: r, time: Date.now(), category: 'survey', surveyType, inputs: {...inputs} };
+    const h = [item, ...history].slice(0, 100);
+    setHistory(h);
+    localStorage.setItem('survey_history', JSON.stringify(h));
+  };
+  
+  // 点击历史记录跳转
+  const jumpToHistory = (item: HistoryItem) => {
+    vibrate();
+    if(item.category === 'calc') {
+      setTab('calc');
+      setDisplay(item.result);
+      setExpr(item.expression + ' =');
+    } else if(item.category === 'survey' && item.surveyType) {
+      setTab('survey');
+      setSurveyType(item.surveyType);
+      if(item.inputs) setInputs(item.inputs);
+      setResult(item.result);
+    }
+  };
+  
+  // 切换主题
+  const changeTheme = (t: string) => {
+    setTheme(t);
+    localStorage.setItem('survey_theme', t);
+  };
+  
   // 计算器函数
-  const clear = () => { vibrate(); setDisplay('0'); setExpr(''); };
+  const clear = () => { vibrate(); setDisplay('0'); setExpr(''); setCalcExpr(''); };
   const append = (v: string) => {
     vibrate();
-    if(display === '0' && v !== '.') setDisplay(v);
-    else if(display === 'Error') setDisplay(v);
-    else setDisplay(display + v);
+    if(display === '0' && v !== '.') { setDisplay(v); setCalcExpr(v); }
+    else if(display === 'Error') { setDisplay(v); setCalcExpr(v); }
+    else { setDisplay(display + v); setCalcExpr(calcExpr + v); }
   };
-  const back = () => { vibrate(); setDisplay(display.length > 1 ? display.slice(0,-1) : '0'); };
+  const back = () => { vibrate(); setDisplay(display.length > 1 ? display.slice(0,-1) : '0'); setCalcExpr(calcExpr.length > 1 ? calcExpr.slice(0,-1) : ''); };
   const toggleSign = () => { vibrate(); if(display !== '0') setDisplay(display.startsWith('-') ? display.slice(1) : '-'+display); };
-  
+    
   const calc = () => {
     vibrate();
     try {
       let e = display
         .replace(/×/g,'*').replace(/÷/g,'/').replace(/π/g,`(${Math.PI})`).replace(/\^/g,'**')
         .replace(/√\(/g,'Math.sqrt(').replace(/∛\(/g,'Math.cbrt(')
-        .replace(/sin\(/g,`Math.sin(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''}`)
-        .replace(/cos\(/g,`Math.cos(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''}`)
-        .replace(/tan\(/g,`Math.tan(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''}`)
-        .replace(/asin\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.asin(`)
-        .replace(/acos\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.acos(`)
-        .replace(/atan\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.atan(`)
+        .replace(/sin\(/g,`Math.sin(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''})`)
+        .replace(/cos\(/g,`Math.cos(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''})`)
+        .replace(/tan\(/g,`Math.tan(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''})`)
+        .replace(/asin\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.asin()`)
+        .replace(/acos\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.acos()`)
+        .replace(/atan\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.atan()`)
         .replace(/ln\(/g,'Math.log(').replace(/log\(/g,'Math.log10(')
         .replace(/abs\(/g,'Math.abs(').replace(/exp\(/g,'Math.exp(');
       const r = eval(e);
       const res = fmt(r);
-      saveHistory(display, res);
+      saveCalcHistory(display, res);
       setExpr(display + ' =');
       setDisplay(res);
+      setCalcExpr('');
     } catch { setDisplay('Error'); }
   };
   
@@ -567,12 +630,19 @@ function App() {
         case 'rand': r = Math.random(); break;
         default: return;
       }
-      saveHistory(`${fn}(${display})`, fmt(r));
+      const exprStr = `${fn}(${display})`;
+      setExpr(exprStr + ' =');
+      saveCalcHistory(exprStr, fmt(r));
       setDisplay(fmt(r));
     } catch { setDisplay('Error'); }
   };
   
-  const insertFn = (fn: string) => { vibrate(); setDisplay(display==='0'||display==='Error' ? fn+'(' : display+fn+'('); };
+  const insertFn = (fn: string) => { 
+    vibrate(); 
+    const newExpr = display==='0'||display==='Error' ? fn+'(' : display+fn+'(';
+    setDisplay(newExpr);
+    setExpr(newExpr);
+  };
   
   // 度分秒转换
   const deg2dms = () => {
@@ -586,18 +656,19 @@ function App() {
       const m = Math.floor(mf);
       const s = (mf-m)*60;
       const r = `${sign}${d}°${m}'${s.toFixed(4)}"`;
-      saveHistory(`D→DMS(${display})`, r);
+      setExpr(`D→DMS(${display}) =`);
+      saveCalcHistory(`D→DMS(${display})`, r);
       setDisplay(r);
     } catch { setDisplay('Error'); }
   };
-  
+    
   const dms2deg = () => {
     vibrate();
     try {
       const inp = display.trim();
       let deg = 0;
       if(inp.includes('°')) {
-        const parts = inp.replace(/['"′″]/g,' ').replace('°',' ').trim().split(/\s+/);
+        const parts = inp.replace(/['"\u2032\u2033]/g,' ').replace('°',' ').trim().split(/\s+/);
         const sign = inp.startsWith('-') ? -1 : 1;
         const d = Math.abs(parseFloat(parts[0]))||0;
         const m = parseFloat(parts[1])||0;
@@ -616,13 +687,14 @@ function App() {
         deg = parseFloat(inp);
       }
       const r = fmt(deg);
-      saveHistory(`DMS→D(${display})`, r);
+      setExpr(`DMS→D(${display}) =`);
+      saveCalcHistory(`DMS→D(${display})`, r);
       setDisplay(r);
     } catch { setDisplay('Error'); }
   };
-  
-  const deg2rad = () => { vibrate(); try { const r = fmt(parseFloat(display)*Math.PI/180); saveHistory(`D→R(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
-  const rad2deg = () => { vibrate(); try { const r = fmt(parseFloat(display)*180/Math.PI); saveHistory(`R→D(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
+    
+  const deg2rad = () => { vibrate(); try { const r = fmt(parseFloat(display)*Math.PI/180); setExpr(`D→R(${display}) =`); saveCalcHistory(`D→R(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
+  const rad2deg = () => { vibrate(); try { const r = fmt(parseFloat(display)*180/Math.PI); setExpr(`R→D(${display}) =`); saveCalcHistory(`R→D(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
   
   // 内存
   const mc = () => { vibrate(); setMem(0); setHasMem(false); };
@@ -831,7 +903,7 @@ function App() {
         default: r = '请选择计算类型';
       }
       setResult(r);
-      saveHistory(surveyType, r.split('\n')[0]);
+      saveSurveyHistory(surveyType, r.split('\n')[0]);
     } catch(e: any) {
       setResult(`计算错误: ${e.message || e}`);
     }
@@ -911,7 +983,7 @@ function App() {
   };
 
   return (
-    <div className={`app ${theme}`}>
+    <div className={`app ${theme}`} style={{background: currentTheme.bg, color: currentTheme.text}}>
       <div className="main-content">
         {/* 首页 */}
         {tab === 'home' && (
@@ -919,39 +991,49 @@ function App() {
             <h1>测绘计算器Pro</h1>
             <p className="subtitle">专业测绘计算 · 向导式操作</p>
             <div className="quick-grid">
-              <div className="quick-card" onClick={()=>{setTab('calc');}}>
-                <span className="icon">🔢</span>
+              <div className="quick-card" style={{background: `linear-gradient(135deg, ${currentTheme.primary}, #1f6feb)`}} onClick={()=>{setTab('calc');}}>
+                <span className="icon">📱</span>
                 <span>科学计算</span>
               </div>
-              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('forward');}}>
+              <div className="quick-card" style={{background: `linear-gradient(135deg, ${currentTheme.primary}, #1f6feb)`}} onClick={()=>{setTab('survey');setSurveyType('forward');}}>
                 <span className="icon">📍</span>
                 <span>坐标正反算</span>
               </div>
-              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('closed_traverse');}}>
+              <div className="quick-card" style={{background: `linear-gradient(135deg, ${currentTheme.primary}, #1f6feb)`}} onClick={()=>{setTab('survey');setSurveyType('closed_traverse');}}>
                 <span className="icon">🔄</span>
                 <span>导线计算</span>
               </div>
-              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('level_closed');}}>
+              <div className="quick-card" style={{background: `linear-gradient(135deg, ${currentTheme.primary}, #1f6feb)`}} onClick={()=>{setTab('survey');setSurveyType('level_closed');}}>
                 <span className="icon">📊</span>
                 <span>水准平差</span>
               </div>
-              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('gauss_forward');}}>
+              <div className="quick-card" style={{background: `linear-gradient(135deg, ${currentTheme.primary}, #1f6feb)`}} onClick={()=>{setTab('survey');setSurveyType('gauss_proj');}}>
                 <span className="icon">🌍</span>
                 <span>高斯投影</span>
               </div>
-              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('transform4');}}>
-                <span className="icon">🔄</span>
+              <div className="quick-card" style={{background: `linear-gradient(135deg, ${currentTheme.primary}, #1f6feb)`}} onClick={()=>{setTab('survey');setSurveyType('coord_sys');}}>
+                <span className="icon">🔀</span>
                 <span>坐标转换</span>
               </div>
             </div>
             <div className="history-section">
-              <h3>历史记录</h3>
-              {history.length === 0 ? <p className="empty">暂无记录</p> : (
+              <div className="history-header">
+                <h3>历史记录</h3>
+                <div className="history-filter">
+                  <button className={historyFilter==='all'?'active':''} onClick={()=>setHistoryFilter('all')}>全部</button>
+                  <button className={historyFilter==='calc'?'active':''} onClick={()=>setHistoryFilter('calc')}>计算器</button>
+                  <button className={historyFilter==='survey'?'active':''} onClick={()=>setHistoryFilter('survey')}>测绘</button>
+                </div>
+              </div>
+              {history.filter(h => historyFilter === 'all' || h.category === historyFilter).length === 0 ? <p className="empty">暂无记录</p> : (
                 <div className="history-list">
-                  {history.slice(0,10).map((h,i) => (
-                    <div key={i} className="history-item">
-                      <span className="expr">{h.expression}</span>
-                      <span className="res">{h.result}</span>
+                  {history.filter(h => historyFilter === 'all' || h.category === historyFilter).slice(0,15).map((h,i) => (
+                    <div key={i} className="history-item" onClick={()=>jumpToHistory(h)} style={{background: currentTheme.card, borderColor: currentTheme.border}}>
+                      <div className="history-item-left">
+                        <span className="history-category" style={{background: h.category==='calc' ? '#1f6feb' : currentTheme.primary}}>{h.category==='calc'?'计算':'测绘'}</span>
+                        <span className="expr">{h.expression}</span>
+                      </div>
+                      <span className="res" style={{color: currentTheme.primary}}>{h.result.length > 20 ? h.result.substring(0,20)+'...' : h.result}</span>
                     </div>
                   ))}
                 </div>
@@ -963,88 +1045,95 @@ function App() {
         {/* 科学计算器 */}
         {tab === 'calc' && (
           <div className="calc-page">
-            <div className="display-area">
-              <div className="expression">{expr}</div>
-              <div className="display">{display}</div>
+            <div className="display-area" style={{background: currentTheme.card, borderColor: currentTheme.border}}>
+              <div className="expression" style={{color: currentTheme.text, opacity: 0.6}}>{expr}</div>
+              <div className="display" style={{color: currentTheme.text}}>{display}</div>
               <div className="status-bar">
-                <span className={hasMem ? 'active' : ''}>M</span>
-                <span>{angleUnit}</span>
+                <span className={hasMem ? 'active' : ''} style={{color: hasMem ? currentTheme.primary : undefined}}>M</span>
+                <span style={{color: currentTheme.primary}}>{angleUnit}</span>
               </div>
             </div>
             <div className="sci-panel">
               <div className="sci-row">
-                <button onClick={()=>applyFn('sin')}>sin</button>
-                <button onClick={()=>applyFn('cos')}>cos</button>
-                <button onClick={()=>applyFn('tan')}>tan</button>
-                <button onClick={()=>insertFn('sinh')}>sinh</button>
-                <button onClick={()=>insertFn('cosh')}>cosh</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('sin')}>sin</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('cos')}>cos</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('tan')}>tan</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('sinh')}>sinh</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('cosh')}>cosh</button>
               </div>
               <div className="sci-row">
-                <button onClick={()=>applyFn('asin')}>sin⁻¹</button>
-                <button onClick={()=>applyFn('acos')}>cos⁻¹</button>
-                <button onClick={()=>applyFn('atan')}>tan⁻¹</button>
-                <button onClick={()=>applyFn('ln')}>ln</button>
-                <button onClick={()=>applyFn('log')}>log</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('asin')}>sin⁻¹</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('acos')}>cos⁻¹</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('atan')}>tan⁻¹</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('ln')}>ln</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('log')}>log</button>
               </div>
               <div className="sci-row">
-                <button onClick={()=>applyFn('√')}>√</button>
-                <button onClick={()=>applyFn('∛')}>∛</button>
-                <button onClick={()=>applyFn('x²')}>x²</button>
-                <button onClick={()=>applyFn('x³')}>x³</button>
-                <button onClick={()=>append('^')}>^</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('√')}>√</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('∛')}>∛</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('x²')}>x²</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('x³')}>x³</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append('^')}>^</button>
               </div>
               <div className="sci-row">
-                <button onClick={()=>applyFn('n!')}>n!</button>
-                <button onClick={()=>applyFn('1/x')}>1/x</button>
-                <button onClick={()=>applyFn('abs')}>|x|</button>
-                <button onClick={()=>applyFn('eˣ')}>eˣ</button>
-                <button onClick={()=>applyFn('10ˣ')}>10ˣ</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('n!')}>n!</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('1/x')}>1/x</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('abs')}>|x|</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('eˣ')}>eˣ</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('10ˣ')}>10ˣ</button>
               </div>
               <div className="sci-row">
-                <button onClick={deg2dms}>D→DMS</button>
-                <button onClick={dms2deg}>DMS→D</button>
-                <button onClick={deg2rad}>D→R</button>
-                <button onClick={rad2deg}>R→D</button>
-                <button onClick={()=>append('°')}>°</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={deg2dms}>D→DMS</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={dms2deg}>DMS→D</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={deg2rad}>D→R</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={rad2deg}>R→D</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append('°')}>°</button>
               </div>
               <div className="sci-row">
-                <button onClick={mc}>MC</button>
-                <button onClick={mr}>MR</button>
-                <button onClick={mAdd}>M+</button>
-                <button onClick={mSub}>M-</button>
-                <button onClick={()=>setAngleUnit(angleUnit==='DEG'?'RAD':angleUnit==='RAD'?'GRAD':'DEG')}>{angleUnit}</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mc}>MC</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mr}>MR</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mAdd}>M+</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={mSub}>M-</button>
+                <button style={{background: currentTheme.primary, color: '#fff', borderColor: currentTheme.border}} onClick={()=>setAngleUnit(angleUnit==='DEG'?'RAD':angleUnit==='RAD'?'GRAD':'DEG')}>{angleUnit}</button>
+              </div>
+              <div className="sci-row">
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append('π')}>π</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append('e')}>e</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append('(')}>{'('}</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append(')')}>{')'}</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('%')}>%</button>
               </div>
             </div>
             <div className="num-panel">
               <div className="num-row">
-                <button className="func" onClick={clear}>C</button>
-                <button className="func" onClick={()=>setDisplay('0')}>CE</button>
-                <button className="func" onClick={back}>⌫</button>
-                <button className="op" onClick={()=>append('÷')}>÷</button>
+                <button className="func" style={{background: currentTheme.card, color: '#f78166'}} onClick={clear}>C</button>
+                <button className="func" style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>setDisplay('0')}>CE</button>
+                <button className="func" style={{background: currentTheme.card, color: currentTheme.text}} onClick={back}>⌫</button>
+                <button className="op" style={{background: currentTheme.primary}} onClick={()=>append('÷')}>÷</button>
               </div>
               <div className="num-row">
-                <button onClick={()=>append('7')}>7</button>
-                <button onClick={()=>append('8')}>8</button>
-                <button onClick={()=>append('9')}>9</button>
-                <button className="op" onClick={()=>append('×')}>×</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('7')}>7</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('8')}>8</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('9')}>9</button>
+                <button className="op" style={{background: currentTheme.primary}} onClick={()=>append('×')}>×</button>
               </div>
               <div className="num-row">
-                <button onClick={()=>append('4')}>4</button>
-                <button onClick={()=>append('5')}>5</button>
-                <button onClick={()=>append('6')}>6</button>
-                <button className="op" onClick={()=>append('-')}>-</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('4')}>4</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('5')}>5</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('6')}>6</button>
+                <button className="op" style={{background: currentTheme.primary}} onClick={()=>append('-')}>-</button>
               </div>
               <div className="num-row">
-                <button onClick={()=>append('1')}>1</button>
-                <button onClick={()=>append('2')}>2</button>
-                <button onClick={()=>append('3')}>3</button>
-                <button className="op" onClick={()=>append('+')}>+</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('1')}>1</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('2')}>2</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('3')}>3</button>
+                <button className="op" style={{background: currentTheme.primary}} onClick={()=>append('+')}>+</button>
               </div>
               <div className="num-row">
-                <button onClick={toggleSign}>±</button>
-                <button onClick={()=>append('0')}>0</button>
-                <button onClick={()=>append('.')}>.</button>
-                <button className="eq" onClick={calc}>=</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={toggleSign}>±</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('0')}>0</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text}} onClick={()=>append('.')}>.</button>
+                <button className="eq" style={{background: `linear-gradient(135deg, ${currentTheme.primary}, #1f6feb)`}} onClick={calc}>=</button>
               </div>
             </div>
           </div>
@@ -1089,30 +1178,88 @@ function App() {
             </div>
             <div className="setting-item">
               <span>震动反馈</span>
-              <button className={`toggle ${vibration?'on':''}`} onClick={()=>setVibration(!vibration)}>{vibration?'开':'关'}</button>
+              <button className={`toggle ${vibration?'on':''}`} style={{background: vibration ? currentTheme.primary : currentTheme.card}} onClick={()=>setVibration(!vibration)}>{vibration?'开':'关'}</button>
             </div>
-            <div className="setting-item">
-              <span>主题</span>
-              <button className={`toggle ${theme==='dark'?'on':''}`} onClick={()=>setTheme(theme==='dark'?'light':'dark')}>{theme==='dark'?'深色':'浅色'}</button>
+            <div className="setting-item" style={{borderColor: currentTheme.border}}>
+              <span>主题色彩</span>
+              <div className="theme-selector">
+                {Object.entries(Themes).map(([key, t]) => (
+                  <button 
+                    key={key} 
+                    className={`theme-btn ${theme===key?'active':''}`}
+                    style={{background: t.primary, border: theme===key ? '3px solid #fff' : 'none'}}
+                    onClick={()=>changeTheme(key)}
+                    title={t.name}
+                  >{t.name.charAt(0)}</button>
+                ))}
+              </div>
             </div>
-            <div className="setting-item">
+            <div className="setting-item" style={{borderColor: currentTheme.border}}>
               <span>清除历史</span>
               <button className="danger" onClick={()=>{setHistory([]);localStorage.removeItem('survey_history');}}>清除</button>
             </div>
+            <div className="setting-item" style={{borderColor: currentTheme.border}}>
+              <span>帮助与反馈</span>
+              <button className="toggle on" style={{background: currentTheme.primary}} onClick={()=>setTab('help')}>查看</button>
+            </div>
             <div className="about">
-              <p>测绘计算器Pro v2.0</p>
+              <p>测绘计算器Pro v3.0</p>
               <p>专业测绘计算解决方案</p>
             </div>
+          </div>
+        )}
+        
+        {/* 帮助页面 */}
+        {tab === 'help' && (
+          <div className="help-page" style={{padding: 20}}>
+            <h2>帮助与知识库</h2>
+            
+            <div className="help-section" style={{marginTop: 20}}>
+              <h3>📚 坐标转换知识</h3>
+              <div className="help-card" style={{background: currentTheme.card, padding: 16, borderRadius: 12, marginTop: 12}}>
+                <p><strong>七参数转换</strong>：适用于不同坐标系间的精确转换，包含3个平移(ΔX/ΔY/ΔZ)、3个旋转(εx/εy/εz)和1个尺度因子(m).</p>
+              </div>
+              <div className="help-card" style={{background: currentTheme.card, padding: 16, borderRadius: 12, marginTop: 12}}>
+                <p><strong>四参数转换</strong>：适用于小范围平面坐标转换，包含2个平移、1个旋转和1个尺度变化.</p>
+              </div>
+              <div className="help-card" style={{background: currentTheme.card, padding: 16, borderRadius: 12, marginTop: 12}}>
+                <p><strong>高斯投影</strong>：将大地坐标(BLH)投影到平面坐标，支持3°带和6°带.</p>
+              </div>
+              <div className="help-card" style={{background: currentTheme.card, padding: 16, borderRadius: 12, marginTop: 12}}>
+                <p><strong>UTM投影</strong>：通用横轴墨卡托投影，将地球划分60个投影带.</p>
+              </div>
+            </div>
+            
+            <div className="help-section" style={{marginTop: 24}}>
+              <h3>🌐 支持的坐标系</h3>
+              <div className="help-card" style={{background: currentTheme.card, padding: 16, borderRadius: 12, marginTop: 12}}>
+                <ul style={{paddingLeft: 20, lineHeight: 2}}>
+                  <li><strong>CGCS2000</strong> - 2000国家大地坐标系</li>
+                  <li><strong>WGS84</strong> - GPS全球定位系统</li>
+                  <li><strong>北京54</strong> - 1954年北京坐标系</li>
+                  <li><strong>西安80</strong> - 1980年西安坐标系</li>
+                </ul>
+              </div>
+            </div>
+            
+            <div className="help-section" style={{marginTop: 24}}>
+              <h3>🔗 相关链接</h3>
+              <div className="help-card" style={{background: currentTheme.card, padding: 16, borderRadius: 12, marginTop: 12}}>
+                <p onClick={()=>window.open('https://github.com/mzy222603/survey-calculator-app')} style={{color: currentTheme.primary, cursor: 'pointer'}}>📦 GitHub仓库 - 查看源码和更新</p>
+              </div>
+            </div>
+            
+            <button className="calc-btn" style={{marginTop: 24, background: `linear-gradient(135deg, ${currentTheme.primary}, #1f6feb)`}} onClick={()=>setTab('settings')}>返回设置</button>
           </div>
         )}
       </div>
 
       {/* 底部导航 */}
-      <nav className="bottom-nav">
-        <button className={tab==='home'?'active':''} onClick={()=>setTab('home')}><span>🏠</span>首页</button>
-        <button className={tab==='calc'?'active':''} onClick={()=>setTab('calc')}><span>🔢</span>计算器</button>
-        <button className={tab==='survey'?'active':''} onClick={()=>setTab('survey')}><span>📐</span>测绘</button>
-        <button className={tab==='settings'?'active':''} onClick={()=>setTab('settings')}><span>⚙️</span>设置</button>
+      <nav className="bottom-nav" style={{background: currentTheme.card, borderColor: currentTheme.border}}>
+        <button className={tab==='home'?'active':''} style={{color: tab==='home' ? currentTheme.primary : undefined}} onClick={()=>setTab('home')}><span>🏠</span>首页</button>
+        <button className={tab==='calc'?'active':''} style={{color: tab==='calc' ? currentTheme.primary : undefined}} onClick={()=>setTab('calc')}><span>📱</span>计算器</button>
+        <button className={tab==='survey'?'active':''} style={{color: tab==='survey' ? currentTheme.primary : undefined}} onClick={()=>setTab('survey')}><span>📐</span>测绘</button>
+        <button className={tab==='settings'||tab==='help'?'active':''} style={{color: (tab==='settings'||tab==='help') ? currentTheme.primary : undefined}} onClick={()=>setTab('settings')}><span>⚙️</span>设置</button>
       </nav>
     </div>
   );
