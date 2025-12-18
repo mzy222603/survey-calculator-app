@@ -10,45 +10,41 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
 
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18.19.0'
+        node-version: '18'
 
-    - name: Setup Java JDK
+    - name: Setup Java
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Clear npm cache
-      run: npm cache clean --force
-
     - name: Install dependencies
-      run: |
-        rm -rf node_modules package-lock.json
-        npm install --legacy-peer-deps
+      run: npm install
 
-    - name: Build React app
-      run: CI=false npm run build
+    - name: Build web app
+      run: npm run build
+
+    - name: Add Android platform
+      run: npx cap add android
 
     - name: Sync Capacitor
       run: npx cap sync android
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x android/gradlew
-
-    - name: Build Debug APK
+    - name: Build APK
       run: |
         cd android
+        chmod +x gradlew
         ./gradlew assembleDebug --no-daemon
 
-    - name: Upload APK artifact
+    - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: survey-calculator-debug
+        name: survey-calculator-pro
         path: android/app/build/outputs/apk/debug/app-debug.apk
         retention-days: 30

@@ -1,1043 +1,855 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import './App.css';
-import { calculator } from './utils/calculator';
-import { surveyCalc, Point } from './utils/survey';
-import { statsCalc } from './utils/statistics';
-import { storage, Settings, HistoryItem } from './utils/storage';
 
-type TabType = 'home' | 'calc' | 'survey' | 'stats' | 'settings';
+// 类型定义
+interface Point { x: number; y: number; z?: number; name?: string; }
+interface HistoryItem { expression: string; result: string; time: number; }
+interface TraverseStation { angle: number; distance: number; }
 
+// ==================== 测绘计算引擎 ====================
+const Survey = {
+  degToRad: (d: number) => d * Math.PI / 180,
+  radToDeg: (r: number) => r * 180 / Math.PI,
+  
+  normalizeAz: (az: number) => { while(az<0)az+=360; while(az>=360)az-=360; return az; },
+  
+  dmsToD: (d: number, m: number, s: number) => {
+    const sign = d >= 0 ? 1 : -1;
+    return sign * (Math.abs(d) + m/60 + s/3600);
+  },
+  
+  dToDms: (deg: number) => {
+    const sign = deg >= 0 ? 1 : -1;
+    deg = Math.abs(deg);
+    const d = Math.floor(deg);
+    const mf = (deg - d) * 60;
+    const m = Math.floor(mf);
+    const s = (mf - m) * 60;
+    return { d: sign * d, m, s };
+  },
+  
+  formatDms: (deg: number) => {
+    const { d, m, s } = Survey.dToDms(deg);
+    return `${d}°${m}'${s.toFixed(2)}"`;
+  },
+  
+  // 坐标正算
+  forward: (p: Point, az: number, dist: number): Point => ({
+    x: p.x + dist * Math.cos(Survey.degToRad(az)),
+    y: p.y + dist * Math.sin(Survey.degToRad(az))
+  }),
+  
+  // 坐标反算
+  inverse: (p1: Point, p2: Point) => {
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    let az = Survey.radToDeg(Math.atan2(dy, dx));
+    return { azimuth: Survey.normalizeAz(az), distance: dist };
+  },
+  
+  // 前方交会
+  forwardIntersect: (pa: Point, pb: Point, angA: number, angB: number): Point => {
+    const { azimuth: azAB } = Survey.inverse(pa, pb);
+    const azAP = Survey.normalizeAz(azAB - angA);
+    const azBP = Survey.normalizeAz(azAB + 180 + angB);
+    const aR = Survey.degToRad(azAP), bR = Survey.degToRad(azBP);
+    const denom = Math.sin(aR)*Math.cos(bR) - Math.cos(aR)*Math.sin(bR);
+    const t = ((pb.y-pa.y)*Math.cos(bR) - (pb.x-pa.x)*Math.sin(bR)) / denom;
+    return { x: pa.x + t*Math.cos(aR), y: pa.y + t*Math.sin(aR) };
+  },
+  
+  // 后方交会
+  resection: (pa: Point, pb: Point, pc: Point, alpha: number, beta: number): Point => {
+    const a = Survey.degToRad(alpha), b = Survey.degToRad(beta);
+    const cotA = 1/Math.tan(a), cotB = 1/Math.tan(b);
+    const k1 = (pb.x-pa.x)*cotA - (pb.y-pa.y);
+    const k2 = (pb.y-pa.y)*cotA + (pb.x-pa.x);
+    const k3 = (pc.x-pb.x)*cotB - (pc.y-pb.y);
+    const k4 = (pc.y-pb.y)*cotB + (pc.x-pb.x);
+    const y = (k1-k3) / (k2-k4);
+    const x = pa.x + (pa.y-y)*cotA;
+    return { x, y };
+  },
+  
+  // 多边形面积
+  polyArea: (pts: Point[]) => {
+    let a = 0;
+    for(let i=0; i<pts.length; i++) {
+      const j = (i+1) % pts.length;
+      a += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+    }
+    return Math.abs(a) / 2;
+  },
+  
+  // 闭合导线计算
+  closedTraverse: (start: Point, startAz: number, stations: TraverseStation[]) => {
+    const n = stations.length;
+    const theory = (n) * 180; // 内角和理论值 = n*180 for closed
+    const measured = stations.reduce((s, t) => s + t.angle, 0);
+    const angClosure = measured - theory;
+    const corr = -angClosure / n;
+    
+    const adjAngles = stations.map(s => s.angle + corr);
+    const azimuths = [startAz];
+    for(let i=0; i<n; i++) {
+      azimuths.push(Survey.normalizeAz(azimuths[i] + adjAngles[i] - 180));
+    }
+    
+    const dxList: number[] = [], dyList: number[] = [];
+    for(let i=0; i<n; i++) {
+      const az = Survey.degToRad(azimuths[i+1]);
+      dxList.push(stations[i].distance * Math.cos(az));
+      dyList.push(stations[i].distance * Math.sin(az));
+    }
+    
+    const fx = dxList.reduce((a,b)=>a+b,0);
+    const fy = dyList.reduce((a,b)=>a+b,0);
+    const f = Math.sqrt(fx*fx + fy*fy);
+    const totalLen = stations.reduce((s,t)=>s+t.distance,0);
+    const relClosure = totalLen > 0 ? f/totalLen : 0;
+    
+    const points: Point[] = [start];
+    let cx = start.x, cy = start.y;
+    for(let i=0; i<n; i++) {
+      const vx = -fx * stations[i].distance / totalLen;
+      const vy = -fy * stations[i].distance / totalLen;
+      cx += dxList[i] + vx;
+      cy += dyList[i] + vy;
+      points.push({ x: cx, y: cy, name: `P${i+1}` });
+    }
+    
+    return { points, angClosure, fx, fy, f, relClosure, adjAngles };
+  },
+  
+  // 附合导线
+  attachedTraverse: (start: Point, end: Point, startAz: number, endAz: number, stations: TraverseStation[]) => {
+    const n = stations.length;
+    let calcAz = startAz;
+    for(const s of stations) calcAz = Survey.normalizeAz(calcAz + s.angle - 180);
+    
+    const angClosure = Survey.normalizeAz(calcAz - endAz);
+    const corr = -angClosure / n;
+    const adjAngles = stations.map(s => s.angle + corr);
+    
+    const azimuths = [startAz];
+    for(let i=0; i<n; i++) {
+      azimuths.push(Survey.normalizeAz(azimuths[i] + adjAngles[i] - 180));
+    }
+    
+    const dxList: number[] = [], dyList: number[] = [];
+    for(let i=0; i<n; i++) {
+      const az = Survey.degToRad(azimuths[i+1]);
+      dxList.push(stations[i].distance * Math.cos(az));
+      dyList.push(stations[i].distance * Math.sin(az));
+    }
+    
+    const sumDx = dxList.reduce((a,b)=>a+b,0);
+    const sumDy = dyList.reduce((a,b)=>a+b,0);
+    const fx = sumDx - (end.x - start.x);
+    const fy = sumDy - (end.y - start.y);
+    const f = Math.sqrt(fx*fx + fy*fy);
+    const totalLen = stations.reduce((s,t)=>s+t.distance,0);
+    const relClosure = totalLen > 0 ? f/totalLen : 0;
+    
+    const points: Point[] = [start];
+    let cx = start.x, cy = start.y, cumDist = 0;
+    for(let i=0; i<n; i++) {
+      cumDist += stations[i].distance;
+      const vx = -fx * cumDist / totalLen;
+      const vy = -fy * cumDist / totalLen;
+      cx = start.x + dxList.slice(0,i+1).reduce((a,b)=>a+b,0) + vx;
+      cy = start.y + dyList.slice(0,i+1).reduce((a,b)=>a+b,0) + vy;
+      points.push({ x: cx, y: cy, name: `P${i+1}` });
+    }
+    
+    return { points, angClosure, fx, fy, f, relClosure, adjAngles };
+  },
+  
+  // 水准闭合路线平差
+  levelClosed: (startH: number, diffs: number[], dists: number[]) => {
+    const closure = diffs.reduce((a,b)=>a+b,0);
+    const totalD = dists.reduce((a,b)=>a+b,0);
+    const heights = [startH];
+    for(let i=0; i<diffs.length; i++) {
+      const v = -closure * dists[i] / totalD;
+      heights.push(heights[i] + diffs[i] + v);
+    }
+    return { heights, closure };
+  },
+  
+  // 水准附合路线平差
+  levelAttached: (startH: number, endH: number, diffs: number[], dists: number[]) => {
+    const measuredEnd = startH + diffs.reduce((a,b)=>a+b,0);
+    const closure = measuredEnd - endH;
+    const totalD = dists.reduce((a,b)=>a+b,0);
+    const heights = [startH];
+    for(let i=0; i<diffs.length; i++) {
+      const v = -closure * dists[i] / totalD;
+      heights.push(heights[i] + diffs[i] + v);
+    }
+    return { heights, closure };
+  },
+  
+  // 高斯正算
+  gaussForward: (lat: number, lon: number, L0?: number) => {
+    const a = 6378137, f = 1/298.257222101;
+    const e2 = 2*f - f*f;
+    const zone = L0 ? Math.round((L0+3)/6) : Math.floor(lon/6)+1;
+    const cm = L0 || zone*6-3;
+    const B = Survey.degToRad(lat), l = Survey.degToRad(lon - cm);
+    const e4=e2*e2, e6=e4*e2;
+    const A0=1-e2/4-3*e4/64-5*e6/256;
+    const X = a*(A0*B - 3/8*(e2+e4/4)*Math.sin(2*B) + 15/256*e4*Math.sin(4*B));
+    const N = a/Math.sqrt(1-e2*Math.sin(B)*Math.sin(B));
+    const t = Math.tan(B), t2=t*t;
+    const eta2 = e2/(1-e2)*Math.cos(B)*Math.cos(B);
+    const cB = Math.cos(B), l2=l*l;
+    const x = X + N*t*cB*cB*l2/2*(1+(5-t2+9*eta2)*cB*cB*l2/12);
+    let y = N*cB*l*(1+(1-t2+eta2)*cB*cB*l2/6) + 500000;
+    return { x, y, zone, cm };
+  },
+  
+  // 高斯反算
+  gaussInverse: (x: number, y: number, cm: number) => {
+    const a = 6378137, f = 1/298.257222101;
+    const e2 = 2*f - f*f;
+    y -= 500000;
+    const e4=e2*e2, e6=e4*e2;
+    const A0=1-e2/4-3*e4/64-5*e6/256;
+    let Bf = x/(a*A0);
+    for(let i=0; i<10; i++) {
+      const FBf = a*(A0*Bf - 3/8*(e2+e4/4)*Math.sin(2*Bf) + 15/256*e4*Math.sin(4*Bf)) - x;
+      const dF = a*A0*(1-e2*Math.sin(Bf)*Math.sin(Bf));
+      Bf -= FBf/dF;
+    }
+    const Nf = a/Math.sqrt(1-e2*Math.sin(Bf)*Math.sin(Bf));
+    const tf = Math.tan(Bf), tf2=tf*tf;
+    const eta2f = e2/(1-e2)*Math.cos(Bf)*Math.cos(Bf);
+    const B = Bf - tf*y*y/(2*Nf*Nf)*(1+eta2f);
+    const l = y/(Nf*Math.cos(Bf))*(1-y*y/(6*Nf*Nf)*(1+2*tf2+eta2f));
+    return { lat: Survey.radToDeg(B), lon: Survey.radToDeg(l)+cm };
+  },
+  
+  // 四参数求解
+  calc4Param: (src: Point[], tgt: Point[]) => {
+    const n = src.length;
+    let sXs=0,sYs=0,sXt=0,sYt=0,sXs2=0,sYs2=0,sXsXt=0,sYsYt=0,sXsYt=0,sYsXt=0;
+    for(let i=0;i<n;i++) {
+      sXs+=src[i].x; sYs+=src[i].y; sXt+=tgt[i].x; sYt+=tgt[i].y;
+      sXs2+=src[i].x*src[i].x; sYs2+=src[i].y*src[i].y;
+      sXsXt+=src[i].x*tgt[i].x; sYsYt+=src[i].y*tgt[i].y;
+      sXsYt+=src[i].x*tgt[i].y; sYsXt+=src[i].y*tgt[i].x;
+    }
+    const A = sXs2+sYs2;
+    const aa = (sXsXt+sYsYt)/A, bb = (sYsXt-sXsYt)/A;
+    const dx = (sXt - aa*sXs + bb*sYs)/n;
+    const dy = (sYt - aa*sYs - bb*sXs)/n;
+    const scale = Math.sqrt(aa*aa+bb*bb);
+    const rot = Math.atan2(bb,aa);
+    return { dx, dy, scale, rotation: Survey.radToDeg(rot) };
+  },
+  
+  // 四参数转换
+  transform4: (pts: Point[], dx: number, dy: number, scale: number, rot: number) => {
+    const r = Survey.degToRad(rot);
+    const cosR = Math.cos(r), sinR = Math.sin(r);
+    return pts.map(p => ({
+      x: dx + scale*(p.x*cosR - p.y*sinR),
+      y: dy + scale*(p.x*sinR + p.y*cosR)
+    }));
+  },
+  
+  // 圆曲线要素
+  circularCurve: (R: number, alpha: number) => {
+    const a = Survey.degToRad(Math.abs(alpha));
+    return {
+      T: R * Math.tan(a/2),
+      L: R * a,
+      E: R * (1/Math.cos(a/2) - 1),
+      C: 2 * R * Math.sin(a/2)
+    };
+  },
+  
+  // 土方计算（断面法）
+  earthwork: (areas: number[], dists: number[]) => {
+    let vol = 0;
+    for(let i=0; i<dists.length; i++) {
+      vol += (areas[i] + areas[i+1]) / 2 * dists[i];
+    }
+    return vol;
+  }
+};
+
+// ==================== 主应用 ====================
 function App() {
-  const [activeTab, setActiveTab] = useState<TabType>('home');
-  const [settings, setSettings] = useState<Settings>(storage.getSettings());
-  const [showScientific, setShowScientific] = useState(true);
-  
-  // 计算器状态
+  const [tab, setTab] = useState<'home'|'calc'|'survey'|'settings'>('home');
   const [display, setDisplay] = useState('0');
-  const [expression, setExpression] = useState('');
+  const [expr, setExpr] = useState('');
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [memory, setMemory] = useState(0);
-  const [hasMemory, setHasMemory] = useState(false);
+  const [mem, setMem] = useState(0);
+  const [hasMem, setHasMem] = useState(false);
+  const [angleUnit, setAngleUnit] = useState<'DEG'|'RAD'|'GRAD'>('DEG');
+  const [precision, setPrecision] = useState(6);
+  const [vibration, setVibration] = useState(true);
+  const [theme, setTheme] = useState<'dark'|'light'>('dark');
   
-  // 测绘状态
+  // 测绘计算状态
   const [surveyType, setSurveyType] = useState('forward');
-  const [surveyInputs, setSurveyInputs] = useState<{[key: string]: string}>({});
-  const [surveyResult, setSurveyResult] = useState('');
+  const [inputs, setInputs] = useState<{[k:string]:string}>({});
+  const [result, setResult] = useState('');
   
-  // 统计状态
-  const [statsData, setStatsData] = useState('');
-  const [statsResult, setStatsResult] = useState('');
-
   useEffect(() => {
-    setHistory(storage.getHistory());
-    calculator.setAngleUnit(settings.angleUnit);
-  }, [settings.angleUnit]);
-
-  const vibrate = useCallback(() => {
-    if (settings.vibration && navigator.vibrate) {
-      navigator.vibrate(10);
-    }
-  }, [settings.vibration]);
-
-  const saveToHistory = (expr: string, result: string, type: HistoryItem['type'] = 'calc') => {
-    storage.addHistory({ expression: expr, result, type });
-    setHistory(storage.getHistory());
-  };
-
-  // ==================== 计算器逻辑 ====================
+    const saved = localStorage.getItem('survey_history');
+    if(saved) setHistory(JSON.parse(saved));
+  }, []);
   
-  const clearAll = () => {
-    vibrate();
-    setDisplay('0');
-    setExpression('');
+  const vibrate = useCallback(() => {
+    if(vibration && navigator.vibrate) navigator.vibrate(10);
+  }, [vibration]);
+  
+  const fmt = (n: number) => n.toFixed(precision);
+  
+  const saveHistory = (e: string, r: string) => {
+    const item = { expression: e, result: r, time: Date.now() };
+    const h = [item, ...history].slice(0, 100);
+    setHistory(h);
+    localStorage.setItem('survey_history', JSON.stringify(h));
   };
-
-  const appendToDisplay = (val: string) => {
+  
+  // 计算器函数
+  const clear = () => { vibrate(); setDisplay('0'); setExpr(''); };
+  const append = (v: string) => {
     vibrate();
-    if (display === '0' && val !== '.') {
-      setDisplay(val);
-    } else if (display === 'Error') {
-      setDisplay(val);
-    } else {
-      setDisplay(display + val);
-    }
+    if(display === '0' && v !== '.') setDisplay(v);
+    else if(display === 'Error') setDisplay(v);
+    else setDisplay(display + v);
   };
-
-  const backspace = () => {
-    vibrate();
-    if (display.length > 1 && display !== 'Error') {
-      setDisplay(display.slice(0, -1));
-    } else {
-      setDisplay('0');
-    }
-  };
-
-  const toggleSign = () => {
-    vibrate();
-    if (display !== '0' && display !== 'Error') {
-      setDisplay(display.startsWith('-') ? display.slice(1) : '-' + display);
-    }
-  };
-
-  const calculate = () => {
+  const back = () => { vibrate(); setDisplay(display.length > 1 ? display.slice(0,-1) : '0'); };
+  const toggleSign = () => { vibrate(); if(display !== '0') setDisplay(display.startsWith('-') ? display.slice(1) : '-'+display); };
+  
+  const calc = () => {
     vibrate();
     try {
-      // 替换显示符号为计算符号
-      let expr = display
-        .replace(/×/g, '*')
-        .replace(/÷/g, '/')
-        .replace(/π/g, `(${Math.PI})`)
-        .replace(/e(?![x])/g, `(${Math.E})`)
-        .replace(/\^/g, '**')
-        .replace(/mod/g, '%')
-        .replace(/√\(/g, 'Math.sqrt(')
-        .replace(/∛\(/g, 'Math.cbrt(')
-        .replace(/sin\(/g, `Math.sin(${settings.angleUnit === 'DEG' ? 'Math.PI/180*' : settings.angleUnit === 'GRAD' ? 'Math.PI/200*' : ''}`)
-        .replace(/cos\(/g, `Math.cos(${settings.angleUnit === 'DEG' ? 'Math.PI/180*' : settings.angleUnit === 'GRAD' ? 'Math.PI/200*' : ''}`)
-        .replace(/tan\(/g, `Math.tan(${settings.angleUnit === 'DEG' ? 'Math.PI/180*' : settings.angleUnit === 'GRAD' ? 'Math.PI/200*' : ''}`)
-        .replace(/asin\(/g, `(${settings.angleUnit === 'DEG' ? '180/Math.PI*' : settings.angleUnit === 'GRAD' ? '200/Math.PI*' : ''}Math.asin(`)
-        .replace(/acos\(/g, `(${settings.angleUnit === 'DEG' ? '180/Math.PI*' : settings.angleUnit === 'GRAD' ? '200/Math.PI*' : ''}Math.acos(`)
-        .replace(/atan\(/g, `(${settings.angleUnit === 'DEG' ? '180/Math.PI*' : settings.angleUnit === 'GRAD' ? '200/Math.PI*' : ''}Math.atan(`)
-        .replace(/sinh\(/g, 'Math.sinh(')
-        .replace(/cosh\(/g, 'Math.cosh(')
-        .replace(/tanh\(/g, 'Math.tanh(')
-        .replace(/ln\(/g, 'Math.log(')
-        .replace(/log\(/g, 'Math.log10(')
-        .replace(/log2\(/g, 'Math.log2(')
-        .replace(/abs\(/g, 'Math.abs(')
-        .replace(/exp\(/g, 'Math.exp(')
-        .replace(/floor\(/g, 'Math.floor(')
-        .replace(/ceil\(/g, 'Math.ceil(')
-        .replace(/round\(/g, 'Math.round(');
-      
-      // eslint-disable-next-line no-eval
-      const result = eval(expr);
-      const formatted = calculator.formatResult(result);
-      saveToHistory(display, formatted);
-      setExpression(display + ' =');
-      setDisplay(formatted);
-      calculator.setAns(result);
-    } catch (e) {
-      setDisplay('Error');
-    }
+      let e = display
+        .replace(/×/g,'*').replace(/÷/g,'/').replace(/π/g,`(${Math.PI})`).replace(/\^/g,'**')
+        .replace(/√\(/g,'Math.sqrt(').replace(/∛\(/g,'Math.cbrt(')
+        .replace(/sin\(/g,`Math.sin(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''}`)
+        .replace(/cos\(/g,`Math.cos(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''}`)
+        .replace(/tan\(/g,`Math.tan(${angleUnit==='DEG'?'Math.PI/180*':angleUnit==='GRAD'?'Math.PI/200*':''}`)
+        .replace(/asin\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.asin(`)
+        .replace(/acos\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.acos(`)
+        .replace(/atan\(/g,`(${angleUnit==='DEG'?'180/Math.PI*':angleUnit==='GRAD'?'200/Math.PI*':''}Math.atan(`)
+        .replace(/ln\(/g,'Math.log(').replace(/log\(/g,'Math.log10(')
+        .replace(/abs\(/g,'Math.abs(').replace(/exp\(/g,'Math.exp(');
+      const r = eval(e);
+      const res = fmt(r);
+      saveHistory(display, res);
+      setExpr(display + ' =');
+      setDisplay(res);
+    } catch { setDisplay('Error'); }
   };
-
-  const applyFunction = (func: string) => {
+  
+  const applyFn = (fn: string) => {
     vibrate();
     try {
-      const value = parseFloat(display);
-      if (isNaN(value) && !['π', 'e', 'rand'].includes(func)) {
-        setDisplay('Error');
-        return;
-      }
-      
-      let result: number;
-      switch (func) {
-        case 'sin': result = calculator.sin(value); break;
-        case 'cos': result = calculator.cos(value); break;
-        case 'tan': result = calculator.tan(value); break;
-        case 'asin': result = calculator.asin(value); break;
-        case 'acos': result = calculator.acos(value); break;
-        case 'atan': result = calculator.atan(value); break;
-        case 'sinh': result = Math.sinh(value); break;
-        case 'cosh': result = Math.cosh(value); break;
-        case 'tanh': result = Math.tanh(value); break;
-        case 'ln': result = Math.log(value); break;
-        case 'log': result = Math.log10(value); break;
-        case 'log2': result = Math.log2(value); break;
-        case '√': result = Math.sqrt(value); break;
-        case '∛': result = Math.cbrt(value); break;
-        case 'x²': result = value * value; break;
-        case 'x³': result = value * value * value; break;
-        case '1/x': result = 1 / value; break;
-        case 'n!': result = calculator.factorial(Math.round(value)); break;
-        case 'abs': result = Math.abs(value); break;
-        case 'exp': result = Math.exp(value); break;
-        case '10ˣ': result = Math.pow(10, value); break;
-        case '2ˣ': result = Math.pow(2, value); break;
-        case 'eˣ': result = Math.exp(value); break;
-        case 'π': result = Math.PI; break;
-        case 'e': result = Math.E; break;
-        case 'rand': result = Math.random(); break;
-        case 'floor': result = Math.floor(value); break;
-        case 'ceil': result = Math.ceil(value); break;
-        case 'round': result = Math.round(value); break;
-        case '%': result = value / 100; break;
-        case 'ANS': result = calculator.getAns(); break;
+      const v = parseFloat(display);
+      let r: number;
+      const toRad = angleUnit==='DEG' ? Math.PI/180 : angleUnit==='GRAD' ? Math.PI/200 : 1;
+      const toDeg = angleUnit==='DEG' ? 180/Math.PI : angleUnit==='GRAD' ? 200/Math.PI : 1;
+      switch(fn) {
+        case 'sin': r = Math.sin(v*toRad); break;
+        case 'cos': r = Math.cos(v*toRad); break;
+        case 'tan': r = Math.tan(v*toRad); break;
+        case 'asin': r = Math.asin(v)*toDeg; break;
+        case 'acos': r = Math.acos(v)*toDeg; break;
+        case 'atan': r = Math.atan(v)*toDeg; break;
+        case 'sinh': r = Math.sinh(v); break;
+        case 'cosh': r = Math.cosh(v); break;
+        case 'tanh': r = Math.tanh(v); break;
+        case 'ln': r = Math.log(v); break;
+        case 'log': r = Math.log10(v); break;
+        case '√': r = Math.sqrt(v); break;
+        case '∛': r = Math.cbrt(v); break;
+        case 'x²': r = v*v; break;
+        case 'x³': r = v*v*v; break;
+        case '1/x': r = 1/v; break;
+        case 'n!': r = Array.from({length:Math.round(v)},(_, i)=>i+1).reduce((a,b)=>a*b,1); break;
+        case 'abs': r = Math.abs(v); break;
+        case '10ˣ': r = Math.pow(10,v); break;
+        case 'eˣ': r = Math.exp(v); break;
+        case '%': r = v/100; break;
+        case 'π': r = Math.PI; break;
+        case 'e': r = Math.E; break;
+        case 'rand': r = Math.random(); break;
         default: return;
       }
-      
-      saveToHistory(`${func}(${display})`, calculator.formatResult(result));
-      setDisplay(calculator.formatResult(result));
-    } catch (e) {
-      setDisplay('Error');
-    }
+      saveHistory(`${fn}(${display})`, fmt(r));
+      setDisplay(fmt(r));
+    } catch { setDisplay('Error'); }
   };
-
-  const insertFunction = (func: string) => {
-    vibrate();
-    if (display === '0' || display === 'Error') {
-      setDisplay(func + '(');
-    } else {
-      setDisplay(display + func + '(');
-    }
-  };
-
-  // 内存功能
-  const memClear = () => { vibrate(); setMemory(0); setHasMemory(false); };
-  const memRecall = () => { vibrate(); setDisplay(String(memory)); };
-  const memAdd = () => { vibrate(); setMemory(memory + parseFloat(display) || 0); setHasMemory(true); };
-  const memSub = () => { vibrate(); setMemory(memory - parseFloat(display) || 0); setHasMemory(true); };
-
-  // 度分秒转换功能
-  // 十进制度 → 度分秒
+  
+  const insertFn = (fn: string) => { vibrate(); setDisplay(display==='0'||display==='Error' ? fn+'(' : display+fn+'('); };
+  
+  // 度分秒转换
   const deg2dms = () => {
     vibrate();
     try {
       const deg = parseFloat(display);
-      if (isNaN(deg)) { setDisplay('Error'); return; }
-      const sign = deg < 0 ? -1 : 1;
-      const absDeg = Math.abs(deg);
-      const d = Math.floor(absDeg);
-      const mFloat = (absDeg - d) * 60;
-      const m = Math.floor(mFloat);
-      const s = (mFloat - m) * 60;
-      // 显示格式: 30°15'20.1234"
-      const result = `${sign < 0 ? '-' : ''}${d}°${m}'${s.toFixed(4)}"`;
-      saveToHistory(`D→DMS(${display})`, result);
-      setDisplay(result);
+      const sign = deg < 0 ? '-' : '';
+      const abs = Math.abs(deg);
+      const d = Math.floor(abs);
+      const mf = (abs-d)*60;
+      const m = Math.floor(mf);
+      const s = (mf-m)*60;
+      const r = `${sign}${d}°${m}'${s.toFixed(4)}"`;
+      saveHistory(`D→DMS(${display})`, r);
+      setDisplay(r);
     } catch { setDisplay('Error'); }
   };
-
-  // 度分秒 → 十进制度
+  
   const dms2deg = () => {
     vibrate();
     try {
-      const input = display.trim();
+      const inp = display.trim();
       let deg = 0;
-      
-      // 格式1: 30°15'20.5" 或 30°15'20.5 或 30°15' 或 30°
-      if (input.includes('°')) {
-        const parts = input.replace(/['"′″]/g, ' ').replace('°', ' ').trim().split(/\s+/);
-        const sign = input.startsWith('-') ? -1 : 1;
-        const d = Math.abs(parseFloat(parts[0])) || 0;
-        const m = parseFloat(parts[1]) || 0;
-        const s = parseFloat(parts[2]) || 0;
-        deg = sign * (d + m / 60 + s / 3600);
-      }
-      // 格式2: 30.1520 表示 30°15'20" (DD.MMSS格式)
-      else if (/^-?\d+\.\d{4,}$/.test(input)) {
-        const val = parseFloat(input);
+      if(inp.includes('°')) {
+        const parts = inp.replace(/['"′″]/g,' ').replace('°',' ').trim().split(/\s+/);
+        const sign = inp.startsWith('-') ? -1 : 1;
+        const d = Math.abs(parseFloat(parts[0]))||0;
+        const m = parseFloat(parts[1])||0;
+        const s = parseFloat(parts[2])||0;
+        deg = sign * (d + m/60 + s/3600);
+      } else if(/^-?\d+\.\d{4,}$/.test(inp)) {
+        const val = parseFloat(inp);
         const sign = val < 0 ? -1 : 1;
-        const absVal = Math.abs(val);
-        const d = Math.floor(absVal);
-        const decimal = absVal - d;
-        const mm = Math.floor(decimal * 100);
-        const ss = (decimal * 100 - mm) * 100;
-        deg = sign * (d + mm / 60 + ss / 3600);
+        const abs = Math.abs(val);
+        const d = Math.floor(abs);
+        const dec = abs - d;
+        const mm = Math.floor(dec*100);
+        const ss = (dec*100-mm)*100;
+        deg = sign * (d + mm/60 + ss/3600);
+      } else {
+        deg = parseFloat(inp);
       }
-      // 格式3: 纯数字，直接当作度
-      else {
-        deg = parseFloat(input);
-      }
-      
-      if (isNaN(deg)) { setDisplay('Error'); return; }
-      const result = deg.toFixed(8);
-      saveToHistory(`DMS→D(${display})`, result);
-      setDisplay(result);
+      const r = fmt(deg);
+      saveHistory(`DMS→D(${display})`, r);
+      setDisplay(r);
     } catch { setDisplay('Error'); }
   };
-
-  // 弧度 → 度
-  const rad2deg = () => {
-    vibrate();
-    try {
-      const rad = parseFloat(display);
-      if (isNaN(rad)) { setDisplay('Error'); return; }
-      const deg = rad * 180 / Math.PI;
-      const result = deg.toFixed(8);
-      saveToHistory(`R→D(${display})`, result);
-      setDisplay(result);
-    } catch { setDisplay('Error'); }
-  };
-
-  // 度 → 弧度
-  const deg2rad = () => {
-    vibrate();
-    try {
-      const deg = parseFloat(display);
-      if (isNaN(deg)) { setDisplay('Error'); return; }
-      const rad = deg * Math.PI / 180;
-      const result = rad.toFixed(8);
-      saveToHistory(`D→R(${display})`, result);
-      setDisplay(result);
-    } catch { setDisplay('Error'); }
-  };
-
-  // 插入度分秒符号
-  const insertDMS = (symbol: string) => {
-    vibrate();
-    if (display === '0' || display === 'Error') {
-      setDisplay(symbol);
-    } else {
-      setDisplay(display + symbol);
-    }
-  };
-
-  // ==================== 测绘计算 ====================
   
-  const handleSurveyInput = (key: string, value: string) => {
-    setSurveyInputs(prev => ({ ...prev, [key]: value }));
-  };
-
-  const calculateSurvey = () => {
+  const deg2rad = () => { vibrate(); try { const r = fmt(parseFloat(display)*Math.PI/180); saveHistory(`D→R(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
+  const rad2deg = () => { vibrate(); try { const r = fmt(parseFloat(display)*180/Math.PI); saveHistory(`R→D(${display})`,r); setDisplay(r); } catch { setDisplay('Error'); } };
+  
+  // 内存
+  const mc = () => { vibrate(); setMem(0); setHasMem(false); };
+  const mr = () => { vibrate(); setDisplay(String(mem)); };
+  const mAdd = () => { vibrate(); setMem(mem + (parseFloat(display)||0)); setHasMem(true); };
+  const mSub = () => { vibrate(); setMem(mem - (parseFloat(display)||0)); setHasMem(true); };
+  
+  // 测绘输入
+  const inp = (k: string, v: string) => setInputs({...inputs, [k]: v});
+  const getN = (k: string) => parseFloat(inputs[k]||'0');
+  
+  // 测绘计算
+  const calcSurvey = () => {
     vibrate();
     try {
-      let result = '';
-      
-      switch (surveyType) {
+      let r = '';
+      switch(surveyType) {
         case 'forward': {
-          const x0 = parseFloat(surveyInputs.x0 || '0');
-          const y0 = parseFloat(surveyInputs.y0 || '0');
-          const azimuth = parseFloat(surveyInputs.azimuth || '0');
-          const distance = parseFloat(surveyInputs.distance || '0');
-          const p = surveyCalc.forwardCalc({ x: x0, y: y0 }, azimuth, distance);
-          result = `【坐标正算结果】
-
-起点坐标:
-  X = ${x0.toFixed(4)}
-  Y = ${y0.toFixed(4)}
-
-方位角: ${azimuth.toFixed(6)}°
-距离: ${distance.toFixed(4)} m
-
-━━━━━━━━━━━━━━
-计算点坐标:
-  X = ${p.x.toFixed(4)} m
-  Y = ${p.y.toFixed(4)} m`;
+          const p = Survey.forward({x:getN('x0'),y:getN('y0')}, getN('az'), getN('dist'));
+          r = `【坐标正算结果】\nX = ${fmt(p.x)}\nY = ${fmt(p.y)}`;
           break;
         }
         case 'inverse': {
-          const x1 = parseFloat(surveyInputs.x1 || '0');
-          const y1 = parseFloat(surveyInputs.y1 || '0');
-          const x2 = parseFloat(surveyInputs.x2 || '100');
-          const y2 = parseFloat(surveyInputs.y2 || '100');
-          const inv = surveyCalc.inverseCalc({ x: x1, y: y1 }, { x: x2, y: y2 });
-          result = `【坐标反算结果】
-
-起点: (${x1.toFixed(4)}, ${y1.toFixed(4)})
-终点: (${x2.toFixed(4)}, ${y2.toFixed(4)})
-
-━━━━━━━━━━━━━━
-方位角: ${inv.azimuth.toFixed(6)}°
-距离: ${inv.distance.toFixed(4)} m`;
+          const res = Survey.inverse({x:getN('x1'),y:getN('y1')}, {x:getN('x2'),y:getN('y2')});
+          r = `【坐标反算结果】\n方位角 = ${fmt(res.azimuth)}° (${Survey.formatDms(res.azimuth)})\n距离 = ${fmt(res.distance)} m`;
           break;
         }
-        case 'forward_intersection': {
-          const xa = parseFloat(surveyInputs.xa || '0');
-          const ya = parseFloat(surveyInputs.ya || '0');
-          const xb = parseFloat(surveyInputs.xb || '100');
-          const yb = parseFloat(surveyInputs.yb || '0');
-          const angleA = parseFloat(surveyInputs.angleA || '45');
-          const angleB = parseFloat(surveyInputs.angleB || '45');
-          const p = surveyCalc.forwardIntersection({x: xa, y: ya}, {x: xb, y: yb}, angleA, angleB);
-          result = `【前方交会结果】
-
-A点: (${xa.toFixed(4)}, ${ya.toFixed(4)})
-B点: (${xb.toFixed(4)}, ${yb.toFixed(4)})
-∠PAB: ${angleA.toFixed(6)}°
-∠PBA: ${angleB.toFixed(6)}°
-
-━━━━━━━━━━━━━━
-P点坐标:
-  X = ${p.x.toFixed(4)} m
-  Y = ${p.y.toFixed(4)} m`;
+        case 'forward_intersect': {
+          const p = Survey.forwardIntersect({x:getN('xa'),y:getN('ya')}, {x:getN('xb'),y:getN('yb')}, getN('angA'), getN('angB'));
+          r = `【前方交会结果】\nXp = ${fmt(p.x)}\nYp = ${fmt(p.y)}`;
           break;
         }
         case 'resection': {
-          const xa = parseFloat(surveyInputs.xa || '0');
-          const ya = parseFloat(surveyInputs.ya || '0');
-          const xb = parseFloat(surveyInputs.xb || '100');
-          const yb = parseFloat(surveyInputs.yb || '0');
-          const xc = parseFloat(surveyInputs.xc || '50');
-          const yc = parseFloat(surveyInputs.yc || '100');
-          const alpha = parseFloat(surveyInputs.alpha || '60');
-          const beta = parseFloat(surveyInputs.beta || '60');
-          const p = surveyCalc.resection({x: xa, y: ya}, {x: xb, y: yb}, {x: xc, y: yc}, alpha, beta);
-          result = `【后方交会结果】
-
-A点: (${xa.toFixed(4)}, ${ya.toFixed(4)})
-B点: (${xb.toFixed(4)}, ${yb.toFixed(4)})
-C点: (${xc.toFixed(4)}, ${yc.toFixed(4)})
-∠APB: ${alpha.toFixed(6)}°
-∠BPC: ${beta.toFixed(6)}°
-
-━━━━━━━━━━━━━━
-测站P坐标:
-  X = ${p.x.toFixed(4)} m
-  Y = ${p.y.toFixed(4)} m`;
-          break;
-        }
-        case 'side_shot': {
-          const x0 = parseFloat(surveyInputs.x0 || '0');
-          const y0 = parseFloat(surveyInputs.y0 || '0');
-          const backAzimuth = parseFloat(surveyInputs.backAzimuth || '0');
-          const angle = parseFloat(surveyInputs.angle || '90');
-          const distance = parseFloat(surveyInputs.distance || '100');
-          const azimuth = (backAzimuth + angle + 180) % 360;
-          const p = surveyCalc.forwardCalc({x: x0, y: y0}, azimuth, distance);
-          result = `【侧方交会/支距法】
-
-测站: (${x0.toFixed(4)}, ${y0.toFixed(4)})
-后视方位角: ${backAzimuth.toFixed(6)}°
-水平角: ${angle.toFixed(6)}°
-距离: ${distance.toFixed(4)} m
-
-计算方位角: ${azimuth.toFixed(6)}°
-
-━━━━━━━━━━━━━━
-目标点坐标:
-  X = ${p.x.toFixed(4)} m
-  Y = ${p.y.toFixed(4)} m`;
+          const p = Survey.resection({x:getN('xa'),y:getN('ya')}, {x:getN('xb'),y:getN('yb')}, {x:getN('xc'),y:getN('yc')}, getN('alpha'), getN('beta'));
+          r = `【后方交会结果】\nXp = ${fmt(p.x)}\nYp = ${fmt(p.y)}`;
           break;
         }
         case 'area': {
-          const pointsStr = surveyInputs.points || '0,0\n100,0\n100,100\n0,100';
-          const points: Point[] = pointsStr.split('\n').map(line => {
-            const [x, y] = line.split(',').map(Number);
-            return { x: x || 0, y: y || 0 };
-          });
-          const area = surveyCalc.polygonArea(points);
-          let pointsList = points.map((p, i) => `  ${i+1}. (${p.x.toFixed(4)}, ${p.y.toFixed(4)})`).join('\n');
-          result = `【多边形面积计算】
-
-顶点坐标:
-${pointsList}
-
-顶点数: ${points.length}
-
-━━━━━━━━━━━━━━
-面积 = ${area.toFixed(4)} m²
-     = ${(area/10000).toFixed(6)} 公顷
-     = ${(area/666.67).toFixed(4)} 亩`;
+          const pts: Point[] = [];
+          for(let i=1; i<=10; i++) {
+            const x = inputs[`ax${i}`], y = inputs[`ay${i}`];
+            if(x && y) pts.push({x:parseFloat(x), y:parseFloat(y)});
+          }
+          if(pts.length < 3) { r = '至少需要3个顶点'; break; }
+          const area = Survey.polyArea(pts);
+          r = `【面积计算结果】
+顶点数: ${pts.length}
+面积 = ${fmt(area)} m²
+面积 = ${fmt(area/10000)} 公顷
+面积 = ${fmt(area/666.67)} 亩`;
+          break;
+        }
+        case 'closed_traverse': {
+          const stations: TraverseStation[] = [];
+          for(let i=1; i<=10; i++) {
+            const ang = inputs[`tang${i}`], dist = inputs[`tdist${i}`];
+            if(ang && dist) stations.push({angle:parseFloat(ang), distance:parseFloat(dist)});
+          }
+          if(stations.length < 3) { r = '至少需要3个测站'; break; }
+          const tr = Survey.closedTraverse({x:getN('tx0'),y:getN('ty0')}, getN('taz0'), stations);
+          r = '【闭合导线计算结果】\n\n角度闭合差: ' + fmt(tr.angClosure) + '" (' + Survey.formatDms(tr.angClosure/3600) + ')\nfx = ' + fmt(tr.fx) + ' m\nfy = ' + fmt(tr.fy) + ' m\n全长闭合差: ' + fmt(tr.f) + ' m\n相对闭合差: 1/' + Math.round(1/tr.relClosure) + '\n\n平差后坐标:\n' + tr.points.map((p,i) => (p.name||'起点') + ': X=' + fmt(p.x) + ', Y=' + fmt(p.y)).join('\n');
+          break;
+        }
+        case 'attached_traverse': {
+          const stations: TraverseStation[] = [];
+          for(let i=1; i<=10; i++) {
+            const ang = inputs[`atang${i}`], dist = inputs[`atdist${i}`];
+            if(ang && dist) stations.push({angle:parseFloat(ang), distance:parseFloat(dist)});
+          }
+          if(stations.length < 1) { r = '至少需要1个测站'; break; }
+          const tr = Survey.attachedTraverse(
+            {x:getN('atx0'),y:getN('aty0')}, {x:getN('atxe'),y:getN('atye')},
+            getN('ataz0'), getN('ataze'), stations
+          );
+          r = '【附合导线计算结果】\n\n角度闭合差: ' + fmt(tr.angClosure) + '"\nfx = ' + fmt(tr.fx) + ' m\nfy = ' + fmt(tr.fy) + ' m\n全长闭合差: ' + fmt(tr.f) + ' m\n相对闭合差: 1/' + Math.round(1/tr.relClosure) + '\n\n平差后坐标:\n' + tr.points.map((p,i) => (i===0?'起点':p.name) + ': X=' + fmt(p.x) + ', Y=' + fmt(p.y)).join('\n');
+          break;
+        }
+        case 'level_closed': {
+          const diffs: number[] = [], dists: number[] = [];
+          for(let i=1; i<=10; i++) {
+            const d = inputs[`ldiff${i}`], l = inputs[`ldist${i}`];
+            if(d && l) { diffs.push(parseFloat(d)); dists.push(parseFloat(l)); }
+          }
+          if(diffs.length < 1) { r = '至少需要1段观测'; break; }
+          const lv = Survey.levelClosed(getN('lh0'), diffs, dists);
+          r = '【闭合水准路线平差】\n\n已知高程: ' + fmt(getN('lh0')) + ' m\n闭合差: ' + fmt(lv.closure*1000) + ' mm\n\n平差后高程:\n' + lv.heights.map((h,i) => '点' + i + ': H=' + fmt(h) + ' m').join('\n');
+          break;
+        }
+        case 'level_attached': {
+          const diffs: number[] = [], dists: number[] = [];
+          for(let i=1; i<=10; i++) {
+            const d = inputs[`aldiff${i}`], l = inputs[`aldist${i}`];
+            if(d && l) { diffs.push(parseFloat(d)); dists.push(parseFloat(l)); }
+          }
+          if(diffs.length < 1) { r = '至少需要1段观测'; break; }
+          const lv = Survey.levelAttached(getN('alh0'), getN('alhe'), diffs, dists);
+          r = '【附合水准路线平差】\n\n起点高程: ' + fmt(getN('alh0')) + ' m\n终点高程: ' + fmt(getN('alhe')) + ' m\n闭合差: ' + fmt(lv.closure*1000) + ' mm\n\n平差后高程:\n' + lv.heights.map((h,i) => '点' + i + ': H=' + fmt(h) + ' m').join('\n');
           break;
         }
         case 'gauss_forward': {
-          const lat = parseFloat(surveyInputs.lat || '30');
-          const lon = parseFloat(surveyInputs.lon || '120');
-          const cm = surveyInputs.cm ? parseFloat(surveyInputs.cm) : undefined;
-          const g = surveyCalc.gaussForward(lat, lon, cm);
-          result = `【高斯投影正算】
-
-经度: ${lon.toFixed(8)}°
-纬度: ${lat.toFixed(8)}°
-中央子午线: ${g.centralMeridian}°
-
-━━━━━━━━━━━━━━
-投影坐标:
-  X (北向) = ${g.x.toFixed(4)} m
-  Y (东向) = ${g.y.toFixed(4)} m
-
-带号: ${g.zone}`;
+          const g = Survey.gaussForward(getN('glat'), getN('glon'), getN('gcm')||undefined);
+          r = '【高斯正算结果】\n\n输入:\n纬度 B = ' + fmt(getN('glat')) + '°\n经度 L = ' + fmt(getN('glon')) + '°\n\n输出:\nX = ' + fmt(g.x) + ' m\nY = ' + fmt(g.y) + ' m\n带号 = ' + g.zone + '\n中央子午线 = ' + g.cm + '°';
           break;
         }
         case 'gauss_inverse': {
-          const x = parseFloat(surveyInputs.gx || '3000000');
-          const y = parseFloat(surveyInputs.gy || '500000');
-          const cm = parseFloat(surveyInputs.cm || '120');
-          const g = surveyCalc.gaussInverse(x, y, cm);
-          result = `【高斯投影反算】
-
-投影坐标:
-  X = ${x.toFixed(4)} m
-  Y = ${y.toFixed(4)} m
-中央子午线: ${cm}°
-
-━━━━━━━━━━━━━━
-地理坐标:
-  纬度 = ${g.lat.toFixed(8)}°
-  经度 = ${g.lon.toFixed(8)}°`;
-          break;
-        }
-        case 'curve': {
-          const radius = parseFloat(surveyInputs.radius || '500');
-          const deflection = parseFloat(surveyInputs.deflection || '30');
-          const c = surveyCalc.circularCurve(radius, deflection);
-          result = `【圆曲线要素计算】
-
-半径 R = ${radius.toFixed(4)} m
-转向角 α = ${deflection.toFixed(6)}°
-
-━━━━━━━━━━━━━━
-曲线要素:
-  切线长 T = ${c.tangentLength.toFixed(4)} m
-  曲线长 L = ${c.curveLength.toFixed(4)} m
-  外矢距 E = ${c.externalDistance.toFixed(4)} m
-  弦长 C = ${c.chord.toFixed(4)} m`;
-          break;
-        }
-        case 'traverse': {
-          const startX = parseFloat(surveyInputs.startX || '0');
-          const startY = parseFloat(surveyInputs.startY || '0');
-          const startAz = parseFloat(surveyInputs.startAz || '0');
-          const stationsStr = surveyInputs.stations || '90,100\n90,100\n90,100\n90,100';
-          const stations = stationsStr.split('\n').map(line => {
-            const [angle, dist] = line.split(',').map(Number);
-            return { angle: angle || 0, distance: dist || 0 };
-          });
-          const tr = surveyCalc.closedTraverse({x: startX, y: startY}, startAz, stations);
-          let stationResults = tr.points.map((p, i) =>
-            `  ${i+1}. X=${p.x.toFixed(4)}, Y=${p.y.toFixed(4)}`
-          ).join('\n');
-          result = `【闭合导线计算】
-
-起始点: (${startX}, ${startY})
-起始方位角: ${startAz}°
-测站数: ${stations.length}
-
-━━━━━━━━━━━━━━
-角度闭合差: ${(tr.angleClosure*3600).toFixed(1)}"
-相对闭合差: 1/${Math.round(1/tr.relativeClosure)}
-
-平差后坐标:
-${stationResults}`;
+          const g = Survey.gaussInverse(getN('gix'), getN('giy'), getN('gicm'));
+          r = '【高斯反算结果】\n\n输入:\nX = ' + fmt(getN('gix')) + ' m\nY = ' + fmt(getN('giy')) + ' m\n中央子午线 = ' + getN('gicm') + '°\n\n输出:\n纬度 B = ' + fmt(g.lat) + '° (' + Survey.formatDms(g.lat) + ')\n经度 L = ' + fmt(g.lon) + '° (' + Survey.formatDms(g.lon) + ')';
           break;
         }
         case 'transform4': {
-          const dx = parseFloat(surveyInputs.dx || '100');
-          const dy = parseFloat(surveyInputs.dy || '200');
-          const scale = parseFloat(surveyInputs.scale || '1');
-          const rotation = parseFloat(surveyInputs.rotation || '0');
-          const x = parseFloat(surveyInputs.tx || '1000');
-          const y = parseFloat(surveyInputs.ty || '2000');
-          const rot = rotation * Math.PI / 180;
-          const newX = dx + scale * (x * Math.cos(rot) - y * Math.sin(rot));
-          const newY = dy + scale * (x * Math.sin(rot) + y * Math.cos(rot));
-          result = `【四参数坐标转换】
-
-转换参数:
-  ΔX = ${dx.toFixed(4)} m
-  ΔY = ${dy.toFixed(4)} m
-  尺度 = ${scale.toFixed(8)}
-  旋转角 = ${rotation.toFixed(8)}°
-
-原坐标: (${x}, ${y})
-
-━━━━━━━━━━━━━━
-转换后坐标:
-  X' = ${newX.toFixed(4)} m
-  Y' = ${newY.toFixed(4)} m`;
+          const src: Point[] = [], tgt: Point[] = [];
+          for(let i=1; i<=5; i++) {
+            const sx=inputs[`t4sx${i}`], sy=inputs[`t4sy${i}`], tx=inputs[`t4tx${i}`], ty=inputs[`t4ty${i}`];
+            if(sx&&sy&&tx&&ty) {
+              src.push({x:parseFloat(sx),y:parseFloat(sy)});
+              tgt.push({x:parseFloat(tx),y:parseFloat(ty)});
+            }
+          }
+          if(src.length < 2) { r = '至少需要2个公共点'; break; }
+          const p = Survey.calc4Param(src, tgt);
+          r = '【四参数求解结果】\n\n公共点数: ' + src.length + '\n\n转换参数:\nΔX = ' + fmt(p.dx) + ' m\nΔY = ' + fmt(p.dy) + ' m\n尺度因子 K = ' + p.scale.toFixed(9) + '\n旋转角 θ = ' + fmt(p.rotation) + '° (' + Survey.formatDms(p.rotation) + ')';
           break;
         }
-        case 'leveling': {
-          const heights = surveyInputs.heights || '100.000\n1.234,-2.345\n1.567,-1.890\n1.123,-2.456';
-          const lines = heights.split('\n');
-          const startH = parseFloat(lines[0]);
-          let h = startH;
-          let total = 0;
-          let observations: string[] = [];
-          for (let i = 1; i < lines.length; i++) {
-            const [back, fore] = lines[i].split(',').map(Number);
-            const diff = back - fore;
-            total += diff;
-            h += diff;
-            observations.push(`  ${i}. 后视=${back.toFixed(3)}, 前视=${Math.abs(fore).toFixed(3)}, 高差=${diff.toFixed(3)}, H=${h.toFixed(3)}`);
-          }
-          result = `【水准测量计算】
-
-起始高程: ${startH.toFixed(3)} m
-测段数: ${lines.length - 1}
-
-观测数据:
-${observations.join('\n')}
-
-━━━━━━━━━━━━━━
-总高差: ${total.toFixed(3)} m
-终点高程: ${h.toFixed(3)} m`;
+        case 'curve': {
+          const c = Survey.circularCurve(getN('cR'), getN('cAlpha'));
+          r = '【圆曲线要素计算】\n\n输入:\n半径 R = ' + fmt(getN('cR')) + ' m\n偏角 α = ' + fmt(getN('cAlpha')) + '°\n\n计算结果:\n切线长 T = ' + fmt(c.T) + ' m\n曲线长 L = ' + fmt(c.L) + ' m\n外矢距 E = ' + fmt(c.E) + ' m\n弦长 C = ' + fmt(c.C) + ' m';
           break;
         }
         case 'earthwork': {
-          const area1 = parseFloat(surveyInputs.area1 || '100');
-          const area2 = parseFloat(surveyInputs.area2 || '120');
-          const dist = parseFloat(surveyInputs.edist || '50');
-          const avg = (area1 + area2) / 2 * dist;
-          const pyramid = dist / 3 * (area1 + area2 + Math.sqrt(area1 * area2));
-          result = `【土方量计算】
-
-断面1面积: ${area1.toFixed(4)} m²
-断面2面积: ${area2.toFixed(4)} m²
-断面间距: ${dist.toFixed(4)} m
-
-━━━━━━━━━━━━━━
-平均断面法:
-  V = ${avg.toFixed(4)} m³
-
-棱台公式法:
-  V = ${pyramid.toFixed(4)} m³`;
+          const areas: number[] = [], dists: number[] = [];
+          for(let i=1; i<=10; i++) {
+            const a = inputs[`ewa${i}`];
+            if(a) areas.push(parseFloat(a));
+            const d = inputs[`ewd${i}`];
+            if(d) dists.push(parseFloat(d));
+          }
+          if(areas.length < 2 || dists.length < 1) { r = '至少需要2个断面和1个间距'; break; }
+          const vol = Survey.earthwork(areas, dists);
+          r = '【土方计算结果】\n\n断面数: ' + areas.length + '\n间距段数: ' + dists.length + '\n\n土方体积 = ' + fmt(vol) + ' m³';
           break;
         }
-        default:
-          result = '请选择计算类型';
+        default: r = '请选择计算类型';
       }
-      
-      setSurveyResult(result);
-      saveToHistory(`测绘-${surveyType}`, result.split('\n')[0], 'survey');
-    } catch (e: any) {
-      setSurveyResult(`计算错误: ${e.message}`);
+      setResult(r);
+      saveHistory(surveyType, r.split('\n')[0]);
+    } catch(e: any) {
+      setResult(`计算错误: ${e.message || e}`);
     }
   };
 
-  // ==================== 统计计算 ====================
+  const surveyTypes = [
+    { id: 'forward', name: '坐标正算', icon: '📍' },
+    { id: 'inverse', name: '坐标反算', icon: '📏' },
+    { id: 'forward_intersect', name: '前方交会', icon: '🔺' },
+    { id: 'resection', name: '后方交会', icon: '🎯' },
+    { id: 'area', name: '面积计算', icon: '⬛' },
+    { id: 'closed_traverse', name: '闭合导线', icon: '🔄' },
+    { id: 'attached_traverse', name: '附合导线', icon: '➡️' },
+    { id: 'level_closed', name: '闭合水准', icon: '📊' },
+    { id: 'level_attached', name: '附合水准', icon: '📈' },
+    { id: 'gauss_forward', name: '高斯正算', icon: '🌍' },
+    { id: 'gauss_inverse', name: '高斯反算', icon: '🗺️' },
+    { id: 'transform4', name: '四参数转换', icon: '🔄' },
+    { id: 'curve', name: '曲线计算', icon: '🛣️' },
+    { id: 'earthwork', name: '土方计算', icon: '🏗️' },
+  ];
   
-  const calculateStats = () => {
-    vibrate();
-    try {
-      const values = statsData.split(/[,\s\n]+/).map(Number).filter(n => !isNaN(n));
-      if (values.length === 0) {
-        setStatsResult('请输入有效数据');
-        return;
-      }
-      
-      statsCalc.setData(values);
-      const q = statsCalc.quartiles();
-      const summary = {
-        count: statsCalc.count(),
-        sum: statsCalc.sum(),
-        mean: statsCalc.mean(),
-        median: statsCalc.median(),
-        mode: statsCalc.mode(),
-        min: statsCalc.min(),
-        max: statsCalc.max(),
-        range: statsCalc.range(),
-        variance: statsCalc.variance(),
-        stdDev: statsCalc.stdDev(),
-        sampleStdDev: statsCalc.sampleStdDev(),
-        skewness: statsCalc.skewness(),
-        kurtosis: statsCalc.kurtosis(),
-        q1: q.q1,
-        q2: q.q2,
-        q3: q.q3,
-        iqr: statsCalc.iqr()
-      };
-      
-      const result = `【统计分析结果】
+  const InputField = ({label, k, placeholder}: {label: string; k: string; placeholder?: string}) => (
+    <div className="input-row">
+      <label>{label}</label>
+      <input type="text" inputMode="decimal" value={inputs[k]||''} onChange={e=>inp(k,e.target.value)} placeholder={placeholder||'0'} />
+    </div>
+  );
 
-样本数: ${summary.count}
-━━━━━━━━━━━━━━
-集中趋势:
-  总和: ${summary.sum.toFixed(6)}
-  均值: ${summary.mean.toFixed(6)}
-  中位数: ${summary.median.toFixed(6)}
-  众数: ${summary.mode.join(', ')}
-
-离散程度:
-  最小值: ${summary.min.toFixed(6)}
-  最大值: ${summary.max.toFixed(6)}
-  极差: ${summary.range.toFixed(6)}
-  方差: ${summary.variance.toFixed(6)}
-  标准差: ${summary.stdDev.toFixed(6)}
-  样本标准差: ${summary.sampleStdDev.toFixed(6)}
-  变异系数: ${(summary.sampleStdDev/summary.mean*100).toFixed(2)}%
-
-分位数:
-  Q1 (25%): ${summary.q1.toFixed(6)}
-  Q2 (50%): ${summary.q2.toFixed(6)}
-  Q3 (75%): ${summary.q3.toFixed(6)}
-  IQR: ${summary.iqr.toFixed(6)}
-
-分布形态:
-  偏度: ${summary.skewness.toFixed(6)}
-  峰度: ${summary.kurtosis.toFixed(6)}`;
-      
-      setStatsResult(result);
-      saveToHistory('统计分析', `n=${summary.count}, μ=${summary.mean.toFixed(4)}`, 'stats');
-    } catch (e: any) {
-      setStatsResult(`错误: ${e.message}`);
+  const renderSurveyInputs = () => {
+    switch(surveyType) {
+      case 'forward':
+        return <><InputField label="起点X" k="x0"/><InputField label="起点Y" k="y0"/><InputField label="方位角(°)" k="az"/><InputField label="距离(m)" k="dist"/></>;
+      case 'inverse':
+        return <><InputField label="点1 X" k="x1"/><InputField label="点1 Y" k="y1"/><InputField label="点2 X" k="x2"/><InputField label="点2 Y" k="y2"/></>;
+      case 'forward_intersect':
+        return <><InputField label="A点X" k="xa"/><InputField label="A点Y" k="ya"/><InputField label="B点X" k="xb"/><InputField label="B点Y" k="yb"/><InputField label="∠PAB(°)" k="angA"/><InputField label="∠PBA(°)" k="angB"/></>;
+      case 'resection':
+        return <><InputField label="A点X" k="xa"/><InputField label="A点Y" k="ya"/><InputField label="B点X" k="xb"/><InputField label="B点Y" k="yb"/><InputField label="C点X" k="xc"/><InputField label="C点Y" k="yc"/><InputField label="∠APB(°)" k="alpha"/><InputField label="∠BPC(°)" k="beta"/></>;
+      case 'area':
+        return <div className="area-inputs">{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="point-row"><span>P{i}</span><input type="text" inputMode="decimal" value={inputs[`ax${i}`]||''} onChange={e=>inp(`ax${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`ay${i}`]||''} onChange={e=>inp(`ay${i}`,e.target.value)} placeholder="Y"/></div>)}</div>;
+      case 'closed_traverse':
+        return <><InputField label="起点X" k="tx0"/><InputField label="起点Y" k="ty0"/><InputField label="起始方位角(°)" k="taz0"/><div className="table-header"><span>测站</span><span>水平角(°)</span><span>边长(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`tang${i}`]||''} onChange={e=>inp(`tang${i}`,e.target.value)} placeholder="角度"/><input type="text" inputMode="decimal" value={inputs[`tdist${i}`]||''} onChange={e=>inp(`tdist${i}`,e.target.value)} placeholder="边长"/></div>)}</>;
+      case 'attached_traverse':
+        return <><InputField label="起点X" k="atx0"/><InputField label="起点Y" k="aty0"/><InputField label="起始方位角(°)" k="ataz0"/><InputField label="终点X" k="atxe"/><InputField label="终点Y" k="atye"/><InputField label="终止方位角(°)" k="ataze"/><div className="table-header"><span>测站</span><span>水平角(°)</span><span>边长(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`atang${i}`]||''} onChange={e=>inp(`atang${i}`,e.target.value)} placeholder="角度"/><input type="text" inputMode="decimal" value={inputs[`atdist${i}`]||''} onChange={e=>inp(`atdist${i}`,e.target.value)} placeholder="边长"/></div>)}</>;
+      case 'level_closed':
+        return <><InputField label="起点高程(m)" k="lh0"/><div className="table-header"><span>段</span><span>高差(m)</span><span>距离(km)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`ldiff${i}`]||''} onChange={e=>inp(`ldiff${i}`,e.target.value)} placeholder="高差"/><input type="text" inputMode="decimal" value={inputs[`ldist${i}`]||''} onChange={e=>inp(`ldist${i}`,e.target.value)} placeholder="距离"/></div>)}</>;
+      case 'level_attached':
+        return <><InputField label="起点高程(m)" k="alh0"/><InputField label="终点高程(m)" k="alhe"/><div className="table-header"><span>段</span><span>高差(m)</span><span>距离(km)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`aldiff${i}`]||''} onChange={e=>inp(`aldiff${i}`,e.target.value)} placeholder="高差"/><input type="text" inputMode="decimal" value={inputs[`aldist${i}`]||''} onChange={e=>inp(`aldist${i}`,e.target.value)} placeholder="距离"/></div>)}</>;
+      case 'gauss_forward':
+        return <><InputField label="纬度B(°)" k="glat" placeholder="如 30.5"/><InputField label="经度L(°)" k="glon" placeholder="如 114.3"/><InputField label="中央子午线(°)" k="gcm" placeholder="自动计算"/></>;
+      case 'gauss_inverse':
+        return <><InputField label="X坐标(m)" k="gix"/><InputField label="Y坐标(m)" k="giy"/><InputField label="中央子午线(°)" k="gicm"/></>;
+      case 'transform4':
+        return <><div className="transform-header">公共点坐标（至少2个）</div><div className="table-header"><span>点</span><span>源X</span><span>源Y</span><span>目标X</span><span>目标Y</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row-4"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t4sx${i}`]||''} onChange={e=>inp(`t4sx${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`t4sy${i}`]||''} onChange={e=>inp(`t4sy${i}`,e.target.value)} placeholder="Y"/><input type="text" inputMode="decimal" value={inputs[`t4tx${i}`]||''} onChange={e=>inp(`t4tx${i}`,e.target.value)} placeholder="X'"/><input type="text" inputMode="decimal" value={inputs[`t4ty${i}`]||''} onChange={e=>inp(`t4ty${i}`,e.target.value)} placeholder="Y'"/></div>)}</>;
+      case 'curve':
+        return <><InputField label="圆曲线半径R(m)" k="cR"/><InputField label="偏角α(°)" k="cAlpha"/></>;
+      case 'earthwork':
+        return <><div className="table-header"><span>断面</span><span>面积(m²)</span><span>间距(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`ewa${i}`]||''} onChange={e=>inp(`ewa${i}`,e.target.value)} placeholder="面积"/><input type="text" inputMode="decimal" value={inputs[`ewd${i}`]||''} onChange={e=>inp(`ewd${i}`,e.target.value)} placeholder="间距"/></div>)}</>;
+      default: return null;
     }
   };
-
-  // ==================== 设置 ====================
-  
-  const updateSetting = <K extends keyof Settings>(key: K, value: Settings[K]) => {
-    const newSettings = { ...settings, [key]: value };
-    setSettings(newSettings);
-    storage.saveSettings(newSettings);
-    if (key === 'angleUnit') calculator.setAngleUnit(value as Settings['angleUnit']);
-  };
-
-  // ==================== 渲染 ====================
 
   return (
-    <div className={`app ${settings.theme}`}>
-      <header className="header">
-        <h1>测绘计算器</h1>
-        <span className="version">Pro</span>
-      </header>
-
-      <main className="main-content">
+    <div className={`app ${theme}`}>
+      <div className="main-content">
         {/* 首页 */}
-        {activeTab === 'home' && (
+        {tab === 'home' && (
           <div className="home-page">
-            <div className="welcome">
-              <h2>专业测绘计算器</h2>
-              <p>科学计算 · 测绘计算 · 统计分析</p>
-            </div>
+            <h1>测绘计算器Pro</h1>
+            <p className="subtitle">专业测绘计算 · 向导式操作</p>
             <div className="quick-grid">
-              <button onClick={() => setActiveTab('calc')}><span>🔢</span><label>科学计算</label></button>
-              <button onClick={() => setActiveTab('survey')}><span>📐</span><label>测绘计算</label></button>
-              <button onClick={() => setActiveTab('stats')}><span>📊</span><label>统计分析</label></button>
-              <button onClick={() => setActiveTab('settings')}><span>⚙️</span><label>设置</label></button>
+              <div className="quick-card" onClick={()=>{setTab('calc');}}>
+                <span className="icon">🔢</span>
+                <span>科学计算</span>
+              </div>
+              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('forward');}}>
+                <span className="icon">📍</span>
+                <span>坐标正反算</span>
+              </div>
+              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('closed_traverse');}}>
+                <span className="icon">🔄</span>
+                <span>导线计算</span>
+              </div>
+              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('level_closed');}}>
+                <span className="icon">📊</span>
+                <span>水准平差</span>
+              </div>
+              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('gauss_forward');}}>
+                <span className="icon">🌍</span>
+                <span>高斯投影</span>
+              </div>
+              <div className="quick-card" onClick={()=>{setTab('survey');setSurveyType('transform4');}}>
+                <span className="icon">🔄</span>
+                <span>坐标转换</span>
+              </div>
             </div>
             <div className="history-section">
-              <h3>计算历史</h3>
-              {history.slice(0, 10).map(item => (
-                <div key={item.id} className="history-row" onClick={() => setDisplay(item.result)}>
-                  <span className="expr">{item.expression}</span>
-                  <span className="result">{item.result}</span>
+              <h3>历史记录</h3>
+              {history.length === 0 ? <p className="empty">暂无记录</p> : (
+                <div className="history-list">
+                  {history.slice(0,10).map((h,i) => (
+                    <div key={i} className="history-item">
+                      <span className="expr">{h.expression}</span>
+                      <span className="res">{h.result}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-              {history.length === 0 && <p className="empty">暂无历史记录</p>}
+              )}
             </div>
           </div>
         )}
 
         {/* 科学计算器 */}
-        {activeTab === 'calc' && (
+        {tab === 'calc' && (
           <div className="calc-page">
-            <div className="calc-display">
-              <div className="expr">{expression}</div>
-              <div className="result">{display}</div>
-              {hasMemory && <div className="memory-indicator">M</div>}
-            </div>
-            
-            <div className="calc-toolbar">
-              <div className="angle-unit">
-                {(['DEG', 'RAD', 'GRAD'] as const).map(u => (
-                  <button key={u} className={settings.angleUnit === u ? 'active' : ''} 
-                    onClick={() => updateSetting('angleUnit', u)}>{u}</button>
-                ))}
+            <div className="display-area">
+              <div className="expression">{expr}</div>
+              <div className="display">{display}</div>
+              <div className="status-bar">
+                <span className={hasMem ? 'active' : ''}>M</span>
+                <span>{angleUnit}</span>
               </div>
-              <button className={showScientific ? 'active' : ''} onClick={() => setShowScientific(!showScientific)}>
-                {showScientific ? '简化' : '科学'}
-              </button>
             </div>
-
-            <div className="calc-buttons">
-              {showScientific && (
-                <div className="sci-panel">
-                  <div className="sci-row">
-                    <button onClick={() => insertFunction('sin')}>sin</button>
-                    <button onClick={() => insertFunction('cos')}>cos</button>
-                    <button onClick={() => insertFunction('tan')}>tan</button>
-                    <button onClick={() => insertFunction('sinh')}>sinh</button>
-                    <button onClick={() => insertFunction('cosh')}>cosh</button>
-                  </div>
-                  <div className="sci-row">
-                    <button onClick={() => insertFunction('asin')}>asin</button>
-                    <button onClick={() => insertFunction('acos')}>acos</button>
-                    <button onClick={() => insertFunction('atan')}>atan</button>
-                    <button onClick={() => insertFunction('tanh')}>tanh</button>
-                    <button onClick={() => applyFunction('π')}>π</button>
-                  </div>
-                  <div className="sci-row">
-                    <button onClick={() => insertFunction('ln')}>ln</button>
-                    <button onClick={() => insertFunction('log')}>log</button>
-                    <button onClick={() => insertFunction('log2')}>log₂</button>
-                    <button onClick={() => applyFunction('e')}>e</button>
-                    <button onClick={() => applyFunction('eˣ')}>eˣ</button>
-                  </div>
-                  <div className="sci-row">
-                    <button onClick={() => insertFunction('√')}>√</button>
-                    <button onClick={() => insertFunction('∛')}>∛</button>
-                    <button onClick={() => applyFunction('x²')}>x²</button>
-                    <button onClick={() => applyFunction('x³')}>x³</button>
-                    <button onClick={() => appendToDisplay('^')}>^</button>
-                  </div>
-                  <div className="sci-row">
-                    <button onClick={() => applyFunction('n!')}>n!</button>
-                    <button onClick={() => applyFunction('1/x')}>1/x</button>
-                    <button onClick={() => insertFunction('abs')}>|x|</button>
-                    <button onClick={() => appendToDisplay('(')}>(</button>
-                    <button onClick={() => appendToDisplay(')')}>)</button>
-                  </div>
-                  <div className="sci-row">
-                    <button onClick={memClear}>MC</button>
-                    <button onClick={memRecall}>MR</button>
-                    <button onClick={memAdd}>M+</button>
-                    <button onClick={memSub}>M-</button>
-                    <button onClick={() => applyFunction('rand')}>Rnd</button>
-                  </div>
-                  <div className="sci-row">
-                    <button onClick={() => insertDMS('°')}>°</button>
-                    <button onClick={() => insertDMS("'")}>′</button>
-                    <button onClick={() => insertDMS('"')}>″</button>
-                    <button onClick={deg2dms}>D→DMS</button>
-                    <button onClick={dms2deg}>DMS→D</button>
-                  </div>
-                  <div className="sci-row">
-                    <button onClick={deg2rad}>D→R</button>
-                    <button onClick={rad2deg}>R→D</button>
-                    <button onClick={() => applyFunction('floor')}>⌊x⌋</button>
-                    <button onClick={() => applyFunction('ceil')}>⌈x⌉</button>
-                    <button onClick={() => applyFunction('ANS')}>ANS</button>
-                  </div>
-                </div>
-              )}
-              
-              <div className="num-panel">
-                <div className="num-row">
-                  <button className="clear" onClick={clearAll}>AC</button>
-                  <button className="func" onClick={toggleSign}>±</button>
-                  <button className="func" onClick={() => applyFunction('%')}>%</button>
-                  <button className="op" onClick={() => appendToDisplay('÷')}>÷</button>
-                </div>
-                <div className="num-row">
-                  <button onClick={() => appendToDisplay('7')}>7</button>
-                  <button onClick={() => appendToDisplay('8')}>8</button>
-                  <button onClick={() => appendToDisplay('9')}>9</button>
-                  <button className="op" onClick={() => appendToDisplay('×')}>×</button>
-                </div>
-                <div className="num-row">
-                  <button onClick={() => appendToDisplay('4')}>4</button>
-                  <button onClick={() => appendToDisplay('5')}>5</button>
-                  <button onClick={() => appendToDisplay('6')}>6</button>
-                  <button className="op" onClick={() => appendToDisplay('-')}>−</button>
-                </div>
-                <div className="num-row">
-                  <button onClick={() => appendToDisplay('1')}>1</button>
-                  <button onClick={() => appendToDisplay('2')}>2</button>
-                  <button onClick={() => appendToDisplay('3')}>3</button>
-                  <button className="op" onClick={() => appendToDisplay('+')}>+</button>
-                </div>
-                <div className="num-row">
-                  <button onClick={() => appendToDisplay('0')}>0</button>
-                  <button onClick={() => appendToDisplay('.')}>.</button>
-                  <button className="func" onClick={backspace}>⌫</button>
-                  <button className="equals" onClick={calculate}>=</button>
-                </div>
+            <div className="sci-panel">
+              <div className="sci-row">
+                <button onClick={()=>applyFn('sin')}>sin</button>
+                <button onClick={()=>applyFn('cos')}>cos</button>
+                <button onClick={()=>applyFn('tan')}>tan</button>
+                <button onClick={()=>insertFn('sinh')}>sinh</button>
+                <button onClick={()=>insertFn('cosh')}>cosh</button>
+              </div>
+              <div className="sci-row">
+                <button onClick={()=>applyFn('asin')}>sin⁻¹</button>
+                <button onClick={()=>applyFn('acos')}>cos⁻¹</button>
+                <button onClick={()=>applyFn('atan')}>tan⁻¹</button>
+                <button onClick={()=>applyFn('ln')}>ln</button>
+                <button onClick={()=>applyFn('log')}>log</button>
+              </div>
+              <div className="sci-row">
+                <button onClick={()=>applyFn('√')}>√</button>
+                <button onClick={()=>applyFn('∛')}>∛</button>
+                <button onClick={()=>applyFn('x²')}>x²</button>
+                <button onClick={()=>applyFn('x³')}>x³</button>
+                <button onClick={()=>append('^')}>^</button>
+              </div>
+              <div className="sci-row">
+                <button onClick={()=>applyFn('n!')}>n!</button>
+                <button onClick={()=>applyFn('1/x')}>1/x</button>
+                <button onClick={()=>applyFn('abs')}>|x|</button>
+                <button onClick={()=>applyFn('eˣ')}>eˣ</button>
+                <button onClick={()=>applyFn('10ˣ')}>10ˣ</button>
+              </div>
+              <div className="sci-row">
+                <button onClick={deg2dms}>D→DMS</button>
+                <button onClick={dms2deg}>DMS→D</button>
+                <button onClick={deg2rad}>D→R</button>
+                <button onClick={rad2deg}>R→D</button>
+                <button onClick={()=>append('°')}>°</button>
+              </div>
+              <div className="sci-row">
+                <button onClick={mc}>MC</button>
+                <button onClick={mr}>MR</button>
+                <button onClick={mAdd}>M+</button>
+                <button onClick={mSub}>M-</button>
+                <button onClick={()=>setAngleUnit(angleUnit==='DEG'?'RAD':angleUnit==='RAD'?'GRAD':'DEG')}>{angleUnit}</button>
+              </div>
+            </div>
+            <div className="num-panel">
+              <div className="num-row">
+                <button className="func" onClick={clear}>C</button>
+                <button className="func" onClick={()=>setDisplay('0')}>CE</button>
+                <button className="func" onClick={back}>⌫</button>
+                <button className="op" onClick={()=>append('÷')}>÷</button>
+              </div>
+              <div className="num-row">
+                <button onClick={()=>append('7')}>7</button>
+                <button onClick={()=>append('8')}>8</button>
+                <button onClick={()=>append('9')}>9</button>
+                <button className="op" onClick={()=>append('×')}>×</button>
+              </div>
+              <div className="num-row">
+                <button onClick={()=>append('4')}>4</button>
+                <button onClick={()=>append('5')}>5</button>
+                <button onClick={()=>append('6')}>6</button>
+                <button className="op" onClick={()=>append('-')}>-</button>
+              </div>
+              <div className="num-row">
+                <button onClick={()=>append('1')}>1</button>
+                <button onClick={()=>append('2')}>2</button>
+                <button onClick={()=>append('3')}>3</button>
+                <button className="op" onClick={()=>append('+')}>+</button>
+              </div>
+              <div className="num-row">
+                <button onClick={toggleSign}>±</button>
+                <button onClick={()=>append('0')}>0</button>
+                <button onClick={()=>append('.')}>.</button>
+                <button className="eq" onClick={calc}>=</button>
               </div>
             </div>
           </div>
         )}
 
         {/* 测绘计算 */}
-        {activeTab === 'survey' && (
+        {tab === 'survey' && (
           <div className="survey-page">
-            <div className="survey-types">
-              {[
-                { key: 'forward', label: '坐标正算' },
-                { key: 'inverse', label: '坐标反算' },
-                { key: 'forward_intersection', label: '前方交会' },
-                { key: 'resection', label: '后方交会' },
-                { key: 'side_shot', label: '侧方交会' },
-                { key: 'area', label: '面积计算' },
-                { key: 'gauss_forward', label: '高斯正算' },
-                { key: 'gauss_inverse', label: '高斯反算' },
-                { key: 'curve', label: '曲线要素' },
-                { key: 'traverse', label: '导线平差' },
-                { key: 'transform4', label: '四参数' },
-                { key: 'leveling', label: '水准测量' },
-                { key: 'earthwork', label: '土方计算' },
-              ].map(({ key, label }) => (
-                <button key={key} className={surveyType === key ? 'active' : ''} 
-                  onClick={() => { setSurveyType(key); setSurveyResult(''); setSurveyInputs({}); }}>{label}</button>
-              ))}
+            <div className="type-selector">
+              <select value={surveyType} onChange={e=>{setSurveyType(e.target.value);setInputs({});setResult('');}}>
+                {surveyTypes.map(t => <option key={t.id} value={t.id}>{t.icon} {t.name}</option>)}
+              </select>
             </div>
-            
             <div className="survey-form">
-              {surveyType === 'forward' && (
-                <>
-                  <div className="input-group"><label>已知点X</label><input type="number" value={surveyInputs.x0||''} onChange={e=>handleSurveyInput('x0',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>已知点Y</label><input type="number" value={surveyInputs.y0||''} onChange={e=>handleSurveyInput('y0',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>方位角(°)</label><input type="number" value={surveyInputs.azimuth||''} onChange={e=>handleSurveyInput('azimuth',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>距离(m)</label><input type="number" value={surveyInputs.distance||''} onChange={e=>handleSurveyInput('distance',e.target.value)} placeholder="100"/></div>
-                </>
-              )}
-              {surveyType === 'inverse' && (
-                <>
-                  <div className="input-group"><label>起点X</label><input type="number" value={surveyInputs.x1||''} onChange={e=>handleSurveyInput('x1',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>起点Y</label><input type="number" value={surveyInputs.y1||''} onChange={e=>handleSurveyInput('y1',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>终点X</label><input type="number" value={surveyInputs.x2||''} onChange={e=>handleSurveyInput('x2',e.target.value)} placeholder="100"/></div>
-                  <div className="input-group"><label>终点Y</label><input type="number" value={surveyInputs.y2||''} onChange={e=>handleSurveyInput('y2',e.target.value)} placeholder="100"/></div>
-                </>
-              )}
-              {surveyType === 'forward_intersection' && (
-                <>
-                  <div className="input-group"><label>A点X</label><input type="number" value={surveyInputs.xa||''} onChange={e=>handleSurveyInput('xa',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>A点Y</label><input type="number" value={surveyInputs.ya||''} onChange={e=>handleSurveyInput('ya',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>B点X</label><input type="number" value={surveyInputs.xb||''} onChange={e=>handleSurveyInput('xb',e.target.value)} placeholder="100"/></div>
-                  <div className="input-group"><label>B点Y</label><input type="number" value={surveyInputs.yb||''} onChange={e=>handleSurveyInput('yb',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>∠PAB(°)</label><input type="number" value={surveyInputs.angleA||''} onChange={e=>handleSurveyInput('angleA',e.target.value)} placeholder="45"/></div>
-                  <div className="input-group"><label>∠PBA(°)</label><input type="number" value={surveyInputs.angleB||''} onChange={e=>handleSurveyInput('angleB',e.target.value)} placeholder="45"/></div>
-                </>
-              )}
-              {surveyType === 'resection' && (
-                <>
-                  <div className="input-group"><label>A点X</label><input type="number" value={surveyInputs.xa||''} onChange={e=>handleSurveyInput('xa',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>A点Y</label><input type="number" value={surveyInputs.ya||''} onChange={e=>handleSurveyInput('ya',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>B点X</label><input type="number" value={surveyInputs.xb||''} onChange={e=>handleSurveyInput('xb',e.target.value)} placeholder="100"/></div>
-                  <div className="input-group"><label>B点Y</label><input type="number" value={surveyInputs.yb||''} onChange={e=>handleSurveyInput('yb',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>C点X</label><input type="number" value={surveyInputs.xc||''} onChange={e=>handleSurveyInput('xc',e.target.value)} placeholder="50"/></div>
-                  <div className="input-group"><label>C点Y</label><input type="number" value={surveyInputs.yc||''} onChange={e=>handleSurveyInput('yc',e.target.value)} placeholder="100"/></div>
-                  <div className="input-group"><label>∠APB(°)</label><input type="number" value={surveyInputs.alpha||''} onChange={e=>handleSurveyInput('alpha',e.target.value)} placeholder="60"/></div>
-                  <div className="input-group"><label>∠BPC(°)</label><input type="number" value={surveyInputs.beta||''} onChange={e=>handleSurveyInput('beta',e.target.value)} placeholder="60"/></div>
-                </>
-              )}
-              {surveyType === 'side_shot' && (
-                <>
-                  <div className="input-group"><label>测站X</label><input type="number" value={surveyInputs.x0||''} onChange={e=>handleSurveyInput('x0',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>测站Y</label><input type="number" value={surveyInputs.y0||''} onChange={e=>handleSurveyInput('y0',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>后视方位角(°)</label><input type="number" value={surveyInputs.backAzimuth||''} onChange={e=>handleSurveyInput('backAzimuth',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>水平角(°)</label><input type="number" value={surveyInputs.angle||''} onChange={e=>handleSurveyInput('angle',e.target.value)} placeholder="90"/></div>
-                  <div className="input-group"><label>距离(m)</label><input type="number" value={surveyInputs.distance||''} onChange={e=>handleSurveyInput('distance',e.target.value)} placeholder="100"/></div>
-                </>
-              )}
-              {surveyType === 'area' && (
-                <div className="input-group full">
-                  <label>多边形顶点(X,Y每行一个)</label>
-                  <textarea value={surveyInputs.points||'0,0\n100,0\n100,100\n0,100'} onChange={e=>handleSurveyInput('points',e.target.value)} rows={6}/>
-                </div>
-              )}
-              {surveyType === 'gauss_forward' && (
-                <>
-                  <div className="input-group"><label>纬度(°)</label><input type="number" value={surveyInputs.lat||''} onChange={e=>handleSurveyInput('lat',e.target.value)} placeholder="30"/></div>
-                  <div className="input-group"><label>经度(°)</label><input type="number" value={surveyInputs.lon||''} onChange={e=>handleSurveyInput('lon',e.target.value)} placeholder="120"/></div>
-                  <div className="input-group"><label>中央子午线(可选)</label><input type="number" value={surveyInputs.cm||''} onChange={e=>handleSurveyInput('cm',e.target.value)} placeholder="自动计算"/></div>
-                </>
-              )}
-              {surveyType === 'gauss_inverse' && (
-                <>
-                  <div className="input-group"><label>X坐标(m)</label><input type="number" value={surveyInputs.gx||''} onChange={e=>handleSurveyInput('gx',e.target.value)} placeholder="3000000"/></div>
-                  <div className="input-group"><label>Y坐标(m)</label><input type="number" value={surveyInputs.gy||''} onChange={e=>handleSurveyInput('gy',e.target.value)} placeholder="500000"/></div>
-                  <div className="input-group"><label>中央子午线(°)</label><input type="number" value={surveyInputs.cm||''} onChange={e=>handleSurveyInput('cm',e.target.value)} placeholder="120"/></div>
-                </>
-              )}
-              {surveyType === 'curve' && (
-                <>
-                  <div className="input-group"><label>半径R(m)</label><input type="number" value={surveyInputs.radius||''} onChange={e=>handleSurveyInput('radius',e.target.value)} placeholder="500"/></div>
-                  <div className="input-group"><label>转向角(°)</label><input type="number" value={surveyInputs.deflection||''} onChange={e=>handleSurveyInput('deflection',e.target.value)} placeholder="30"/></div>
-                </>
-              )}
-              {surveyType === 'traverse' && (
-                <>
-                  <div className="input-group"><label>起点X</label><input type="number" value={surveyInputs.startX||''} onChange={e=>handleSurveyInput('startX',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>起点Y</label><input type="number" value={surveyInputs.startY||''} onChange={e=>handleSurveyInput('startY',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>起始方位角(°)</label><input type="number" value={surveyInputs.startAz||''} onChange={e=>handleSurveyInput('startAz',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group full"><label>测站数据(角度,距离 每行一站)</label><textarea value={surveyInputs.stations||'90,100\n90,100\n90,100\n90,100'} onChange={e=>handleSurveyInput('stations',e.target.value)} rows={5}/></div>
-                </>
-              )}
-              {surveyType === 'transform4' && (
-                <>
-                  <div className="input-group"><label>平移ΔX(m)</label><input type="number" value={surveyInputs.dx||''} onChange={e=>handleSurveyInput('dx',e.target.value)} placeholder="100"/></div>
-                  <div className="input-group"><label>平移ΔY(m)</label><input type="number" value={surveyInputs.dy||''} onChange={e=>handleSurveyInput('dy',e.target.value)} placeholder="200"/></div>
-                  <div className="input-group"><label>尺度因子</label><input type="number" value={surveyInputs.scale||''} onChange={e=>handleSurveyInput('scale',e.target.value)} placeholder="1" step="0.0000001"/></div>
-                  <div className="input-group"><label>旋转角(°)</label><input type="number" value={surveyInputs.rotation||''} onChange={e=>handleSurveyInput('rotation',e.target.value)} placeholder="0"/></div>
-                  <div className="input-group"><label>原X坐标</label><input type="number" value={surveyInputs.tx||''} onChange={e=>handleSurveyInput('tx',e.target.value)} placeholder="1000"/></div>
-                  <div className="input-group"><label>原Y坐标</label><input type="number" value={surveyInputs.ty||''} onChange={e=>handleSurveyInput('ty',e.target.value)} placeholder="2000"/></div>
-                </>
-              )}
-              {surveyType === 'leveling' && (
-                <div className="input-group full">
-                  <label>水准数据(第一行起始高程，后续每行:后视,前视)</label>
-                  <textarea value={surveyInputs.heights||'100.000\n1.234,-2.345\n1.567,-1.890\n1.123,-2.456'} onChange={e=>handleSurveyInput('heights',e.target.value)} rows={6}/>
-                </div>
-              )}
-              {surveyType === 'earthwork' && (
-                <>
-                  <div className="input-group"><label>断面1面积(m²)</label><input type="number" value={surveyInputs.area1||''} onChange={e=>handleSurveyInput('area1',e.target.value)} placeholder="100"/></div>
-                  <div className="input-group"><label>断面2面积(m²)</label><input type="number" value={surveyInputs.area2||''} onChange={e=>handleSurveyInput('area2',e.target.value)} placeholder="120"/></div>
-                  <div className="input-group"><label>断面间距(m)</label><input type="number" value={surveyInputs.edist||''} onChange={e=>handleSurveyInput('edist',e.target.value)} placeholder="50"/></div>
-                </>
-              )}
-              
-              <button className="calc-btn" onClick={calculateSurvey}>计 算</button>
+              {renderSurveyInputs()}
             </div>
-            
-            {surveyResult && (
-              <div className="survey-result">
-                <pre>{surveyResult}</pre>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 统计分析 */}
-        {activeTab === 'stats' && (
-          <div className="stats-page">
-            <div className="stats-input">
-              <label>输入数据(逗号、空格或换行分隔)</label>
-              <textarea value={statsData} onChange={e => setStatsData(e.target.value)} 
-                placeholder="1, 2, 3, 4, 5&#10;或每行一个数据" rows={6}/>
-              <button className="calc-btn" onClick={calculateStats}>统计分析</button>
-            </div>
-            {statsResult && (
-              <div className="stats-result">
-                <pre>{statsResult}</pre>
-              </div>
-            )}
+            <button className="calc-btn" onClick={calcSurvey}>计 算</button>
+            {result && <div className="survey-result"><pre>{result}</pre></div>}
           </div>
         )}
 
         {/* 设置 */}
-        {activeTab === 'settings' && (
+        {tab === 'settings' && (
           <div className="settings-page">
-            <div className="settings-group">
-              <h3>显示设置</h3>
-              <div className="setting-item">
-                <span>主题</span>
-                <div className="setting-options">
-                  <button className={settings.theme==='dark'?'active':''} onClick={()=>updateSetting('theme','dark')}>深色</button>
-                  <button className={settings.theme==='light'?'active':''} onClick={()=>updateSetting('theme','light')}>浅色</button>
-                </div>
-              </div>
-              <div className="setting-item">
-                <span>角度单位</span>
-                <div className="setting-options">
-                  {(['DEG','RAD','GRAD'] as const).map(u=>(
-                    <button key={u} className={settings.angleUnit===u?'active':''} onClick={()=>updateSetting('angleUnit',u)}>{u}</button>
-                  ))}
-                </div>
-              </div>
-              <div className="setting-item">
-                <span>小数位数</span>
-                <div className="setting-options">
-                  <input type="range" min="1" max="15" value={settings.precision} onChange={e=>updateSetting('precision',parseInt(e.target.value))}/>
-                  <span>{settings.precision}</span>
-                </div>
-              </div>
-              <div className="setting-item">
-                <span>震动反馈</span>
-                <button className={`toggle ${settings.vibration?'active':''}`} onClick={()=>updateSetting('vibration',!settings.vibration)}/>
-              </div>
+            <h2>设置</h2>
+            <div className="setting-item">
+              <span>角度单位</span>
+              <select value={angleUnit} onChange={e=>setAngleUnit(e.target.value as any)}>
+                <option value="DEG">度 (DEG)</option>
+                <option value="RAD">弧度 (RAD)</option>
+                <option value="GRAD">梯度 (GRAD)</option>
+              </select>
             </div>
-            <div className="settings-group">
-              <h3>数据管理</h3>
-              <button className="action-btn" onClick={()=>{storage.clearHistory();setHistory([]);}}>清除历史记录</button>
-              <button className="action-btn" onClick={()=>alert(storage.exportAll())}>导出数据</button>
+            <div className="setting-item">
+              <span>计算精度</span>
+              <select value={precision} onChange={e=>setPrecision(parseInt(e.target.value))}>
+                <option value="4">4位小数</option>
+                <option value="6">6位小数</option>
+                <option value="8">8位小数</option>
+                <option value="10">10位小数</option>
+              </select>
             </div>
-            <div className="app-info">
-              <div className="logo">📐</div>
-              <div className="name">测绘计算器 Pro</div>
-              <div className="ver">版本 2.0.0</div>
+            <div className="setting-item">
+              <span>震动反馈</span>
+              <button className={`toggle ${vibration?'on':''}`} onClick={()=>setVibration(!vibration)}>{vibration?'开':'关'}</button>
+            </div>
+            <div className="setting-item">
+              <span>主题</span>
+              <button className={`toggle ${theme==='dark'?'on':''}`} onClick={()=>setTheme(theme==='dark'?'light':'dark')}>{theme==='dark'?'深色':'浅色'}</button>
+            </div>
+            <div className="setting-item">
+              <span>清除历史</span>
+              <button className="danger" onClick={()=>{setHistory([]);localStorage.removeItem('survey_history');}}>清除</button>
+            </div>
+            <div className="about">
+              <p>测绘计算器Pro v2.0</p>
+              <p>专业测绘计算解决方案</p>
             </div>
           </div>
         )}
-      </main>
+      </div>
 
+      {/* 底部导航 */}
       <nav className="bottom-nav">
-        {[
-          { key: 'home', icon: '🏠', label: '首页' },
-          { key: 'calc', icon: '🔢', label: '计算' },
-          { key: 'survey', icon: '📐', label: '测绘' },
-          { key: 'stats', icon: '📊', label: '统计' },
-          { key: 'settings', icon: '⚙️', label: '设置' },
-        ].map(({ key, icon, label }) => (
-          <button key={key} className={`nav-item ${activeTab === key ? 'active' : ''}`}
-            onClick={() => setActiveTab(key as TabType)}>
-            <span className="icon">{icon}</span>
-            <span className="label">{label}</span>
-          </button>
-        ))}
+        <button className={tab==='home'?'active':''} onClick={()=>setTab('home')}><span>🏠</span>首页</button>
+        <button className={tab==='calc'?'active':''} onClick={()=>setTab('calc')}><span>🔢</span>计算器</button>
+        <button className={tab==='survey'?'active':''} onClick={()=>setTab('survey')}><span>📐</span>测绘</button>
+        <button className={tab==='settings'?'active':''} onClick={()=>setTab('settings')}><span>⚙️</span>设置</button>
       </nav>
     </div>
   );
