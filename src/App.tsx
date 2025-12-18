@@ -131,7 +131,9 @@ const Survey = {
   // 闭合导线计算
   closedTraverse: (start: Point, startAz: number, stations: TraverseStation[]) => {
     const n = stations.length;
-    const theory = (n) * 180; // 内角和理论值 = n*180 for closed
+    // 闭合导线内角和理论值 = (n)*180（左角观测）或 (n+2)*180（右角观测）
+    // 这里假设使用左角观测，理论值 = (n)*180
+    const theory = n * 180;
     const measured = stations.reduce((s, t) => s + t.angle, 0);
     const angClosure = measured - theory;
     const corr = -angClosure / n;
@@ -634,8 +636,12 @@ function App() {
         case 'sinh': r = Math.sinh(v); break;
         case 'cosh': r = Math.cosh(v); break;
         case 'tanh': r = Math.tanh(v); break;
+        case 'asinh': r = Math.asinh(v); break;
+        case 'acosh': r = Math.acosh(v); break;
+        case 'atanh': r = Math.atanh(v); break;
         case 'ln': r = Math.log(v); break;
         case 'log': r = Math.log10(v); break;
+        case 'log2': r = Math.log2(v); break;
         case '√': r = Math.sqrt(v); break;
         case '∛': r = Math.cbrt(v); break;
         case 'x²': r = v*v; break;
@@ -645,10 +651,16 @@ function App() {
         case 'abs': r = Math.abs(v); break;
         case '10ˣ': r = Math.pow(10,v); break;
         case 'eˣ': r = Math.exp(v); break;
+        case '2ˣ': r = Math.pow(2,v); break;
         case '%': r = v/100; break;
         case 'π': r = Math.PI; break;
         case 'e': r = Math.E; break;
         case 'rand': r = Math.random(); break;
+        case 'floor': r = Math.floor(v); break;
+        case 'ceil': r = Math.ceil(v); break;
+        case 'round': r = Math.round(v); break;
+        case 'sign': r = Math.sign(v); break;
+        case 'frac': r = v - Math.floor(v); break;
         default: return;
       }
       const exprStr = `${fn}(${display})`;
@@ -979,6 +991,44 @@ function App() {
           r = '【坐标系转换结果】\n\n' + srcSys + ' → ' + tgtSys + '\n\n源坐标:' + '\nB = ' + fmt(getN('csB')) + '°\nL = ' + fmt(getN('csL')) + '°\nH = ' + fmt(getN('csH')) + ' m\n\n转换参数:\nΔX=' + params.dx + 'm, ΔY=' + params.dy + 'm, ΔZ=' + params.dz + 'm\n\n目标坐标:\nB = ' + fmt(tgtBlh.B) + '° (' + Survey.formatDms(tgtBlh.B) + ')\nL = ' + fmt(tgtBlh.L) + '° (' + Survey.formatDms(tgtBlh.L) + ')\nH = ' + fmt(tgtBlh.H) + ' m';
           break;
         }
+        case 'distance_intersect': {
+          // 距离交会
+          const xa = getN('dixa'), ya = getN('diya'), xb = getN('dixb'), yb = getN('diyb');
+          const da = getN('dida'), db = getN('didb');
+          const dx = xb - xa, dy = yb - ya;
+          const d = Math.sqrt(dx*dx + dy*dy);
+          if (d === 0 || da + db < d || Math.abs(da - db) > d) {
+            r = '距离交会无解，请检查输入数据';
+            break;
+          }
+          const a = (da*da - db*db + d*d) / (2*d);
+          const h = Math.sqrt(da*da - a*a);
+          const px = xa + a*dx/d, py = ya + a*dy/d;
+          const p1x = px + h*dy/d, p1y = py - h*dx/d;
+          const p2x = px - h*dy/d, p2y = py + h*dx/d;
+          r = '【距离交会结果】\n\nA点: (' + fmt(xa) + ', ' + fmt(ya) + ')\nB点: (' + fmt(xb) + ', ' + fmt(yb) + ')\nAB距离: ' + fmt(d) + ' m\n距A距离: ' + fmt(da) + ' m\n距B距离: ' + fmt(db) + ' m\n\n交会点P1:\nX = ' + fmt(p1x) + ' m\nY = ' + fmt(p1y) + ' m\n\n交会点P2:\nX = ' + fmt(p2x) + ' m\nY = ' + fmt(p2y) + ' m';
+          break;
+        }
+        case 'trig_height': {
+          // 三角高程
+          const H0 = getN('thH0'), i = getN('thi'), S = getN('thS'), V = getN('thV'), v = getN('thv');
+          const Vrad = Survey.degToRad(V);
+          const D = S * Math.cos(Vrad); // 平距
+          const dH = S * Math.sin(Vrad); // 高差
+          const H = H0 + i + dH - v;
+          r = '【三角高程计算】\n\n输入:\n测站高程 H0 = ' + fmt(H0) + ' m\n仪器高 i = ' + fmt(i) + ' m\n斜距 S = ' + fmt(S) + ' m\n竖直角 V = ' + fmt(V) + '°\n目标高 v = ' + fmt(v) + ' m\n\n计算结果:\n平距 D = ' + fmt(D) + ' m\n高差 dH = ' + fmt(dH) + ' m\n目标点高程 H = ' + fmt(H) + ' m\n\n公式: H = H0 + i + S·sin(V) - v';
+          break;
+        }
+        case 'azimuth_calc': {
+          // 方位角计算
+          const x1 = getN('azx1'), y1 = getN('azy1'), x2 = getN('azx2'), y2 = getN('azy2');
+          const dx = x2 - x1, dy = y2 - y1;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          let az = Survey.radToDeg(Math.atan2(dy, dx));
+          az = Survey.normalizeAz(az);
+          r = '【方位角计算】\n\n起点: (' + fmt(x1) + ', ' + fmt(y1) + ')\n终点: (' + fmt(x2) + ', ' + fmt(y2) + ')\n\n坐标增量:\nΔX = ' + fmt(dx) + ' m\nΔY = ' + fmt(dy) + ' m\n\n计算结果:\n方位角 = ' + fmt(az) + '°\n方位角 = ' + Survey.formatDms(az) + '\n距离 = ' + fmt(dist) + ' m';
+          break;
+        }
         default: r = '请选择计算类型';
       }
       setResult(r);
@@ -1012,6 +1062,9 @@ function App() {
     { id: 'vertical_curve', name: '竖曲线计算', icon: '📉' },
     { id: 'earthwork', name: '土方计算', icon: '🏗️' },
     { id: 'slope', name: '边坡放样', icon: '⛰️' },
+    { id: 'distance_intersect', name: '距离交会', icon: '⭕' },
+    { id: 'trig_height', name: '三角高程', icon: '📐' },
+    { id: 'azimuth_calc', name: '方位角计算', icon: '🧭' },
   ];
   
   // 使用useCallback缓存输入函数，避免重新渲染
@@ -1067,6 +1120,12 @@ function App() {
         return <><div className="select-row"><label>模式</label><select value={inputs['t7mode']||'calc'} onChange={e=>handleInputChange('t7mode',e.target.value)}><option value="calc">参数求解</option><option value="apply">参数转换</option></select></div>{(inputs['t7mode']||'calc')==='calc'?<><div className="transform-header">公共点坐标（至少3个）- 空间直角坐标</div><div className="table-header"><span>点</span><span>源X</span><span>源Y</span><span>源Z</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t7sX${i}`]||''} onChange={e=>handleInputChange(`t7sX${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`t7sY${i}`]||''} onChange={e=>handleInputChange(`t7sY${i}`,e.target.value)} placeholder="Y"/><input type="text" inputMode="decimal" value={inputs[`t7sZ${i}`]||''} onChange={e=>handleInputChange(`t7sZ${i}`,e.target.value)} placeholder="Z"/></div>)}<div className="table-header"><span>点</span><span>目X</span><span>目Y</span><span>目Z</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t7tX${i}`]||''} onChange={e=>handleInputChange(`t7tX${i}`,e.target.value)} placeholder="X'"/><input type="text" inputMode="decimal" value={inputs[`t7tY${i}`]||''} onChange={e=>handleInputChange(`t7tY${i}`,e.target.value)} placeholder="Y'"/><input type="text" inputMode="decimal" value={inputs[`t7tZ${i}`]||''} onChange={e=>handleInputChange(`t7tZ${i}`,e.target.value)} placeholder="Z'"/></div>)}</>:<><div className="transform-header">布尔萨七参数</div><InputField label="ΔX(m)" k="t7dx" value={inputs['t7dx']||''} onChange={handleInputChange}/><InputField label="ΔY(m)" k="t7dy" value={inputs['t7dy']||''} onChange={handleInputChange}/><InputField label="ΔZ(m)" k="t7dz" value={inputs['t7dz']||''} onChange={handleInputChange}/><InputField label="εx(角秒)" k="t7rx" value={inputs['t7rx']||''} onChange={handleInputChange}/><InputField label="εy(角秒)" k="t7ry" value={inputs['t7ry']||''} onChange={handleInputChange}/><InputField label="εz(角秒)" k="t7rz" value={inputs['t7rz']||''} onChange={handleInputChange}/><InputField label="m(ppm)" k="t7m" value={inputs['t7m']||''} onChange={handleInputChange}/><div className="transform-header">待转换点</div><InputField label="X(m)" k="t7X" value={inputs['t7X']||''} onChange={handleInputChange}/><InputField label="Y(m)" k="t7Y" value={inputs['t7Y']||''} onChange={handleInputChange}/><InputField label="Z(m)" k="t7Z" value={inputs['t7Z']||''} onChange={handleInputChange}/></>}</>;
       case 'coord_sys':
         return <><div className="select-row"><label>源坐标系</label><select value={inputs['csSrc']||'WGS84'} onChange={e=>handleInputChange('csSrc',e.target.value)}><option value="WGS84">WGS84</option><option value="CGCS2000">CGCS2000</option></select></div><div className="select-row"><label>目标坐标系</label><select value={inputs['csTgt']||'CGCS2000'} onChange={e=>handleInputChange('csTgt',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option></select></div><InputField label="纬度B(°)" k="csB" value={inputs['csB']||''} onChange={handleInputChange}/><InputField label="经度L(°)" k="csL" value={inputs['csL']||''} onChange={handleInputChange}/><InputField label="大地高H(m)" k="csH" value={inputs['csH']||''} onChange={handleInputChange}/></>;
+      case 'distance_intersect':
+        return <><InputField label="A点X" k="dixa" value={inputs['dixa']||''} onChange={handleInputChange}/><InputField label="A点Y" k="diya" value={inputs['diya']||''} onChange={handleInputChange}/><InputField label="B点X" k="dixb" value={inputs['dixb']||''} onChange={handleInputChange}/><InputField label="B点Y" k="diyb" value={inputs['diyb']||''} onChange={handleInputChange}/><InputField label="距A距离(m)" k="dida" value={inputs['dida']||''} onChange={handleInputChange}/><InputField label="距B距离(m)" k="didb" value={inputs['didb']||''} onChange={handleInputChange}/></>;
+      case 'trig_height':
+        return <><InputField label="测站高程(m)" k="thH0" value={inputs['thH0']||''} onChange={handleInputChange}/><InputField label="仪器高(m)" k="thi" value={inputs['thi']||''} onChange={handleInputChange}/><InputField label="斜距(m)" k="thS" value={inputs['thS']||''} onChange={handleInputChange}/><InputField label="竖直角(°)" k="thV" value={inputs['thV']||''} onChange={handleInputChange} placeholder="仰角为正"/><InputField label="目标高(m)" k="thv" value={inputs['thv']||''} onChange={handleInputChange} placeholder="棱镜高"/></>;
+      case 'azimuth_calc':
+        return <><InputField label="起点X" k="azx1" value={inputs['azx1']||''} onChange={handleInputChange}/><InputField label="起点Y" k="azy1" value={inputs['azy1']||''} onChange={handleInputChange}/><InputField label="终点X" k="azx2" value={inputs['azx2']||''} onChange={handleInputChange}/><InputField label="终点Y" k="azy2" value={inputs['azy2']||''} onChange={handleInputChange}/></>;
       default: return null;
     }
   };
@@ -1192,6 +1251,13 @@ function App() {
                 <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>append(')')}>{')'}</button>
                 <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('%')}>%</button>
               </div>
+              <div className="sci-row">
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('floor')}>取整↓</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('ceil')}>取整↑</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('round')}>四舍五入</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('log2')}>log₂</button>
+                <button style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}} onClick={()=>applyFn('2ˣ')}>2ˣ</button>
+              </div>
             </div>
             <div className="num-panel">
               <div className="num-row">
@@ -1309,7 +1375,7 @@ function App() {
               <button className="toggle on" style={{background: currentTheme.primary}} onClick={()=>setTab('help')}>查看</button>
             </div>
             <div className="about">
-              <p>测绘计算器Pro v3.2</p>
+              <p>测绘计算器Pro v3.3</p>
               <p>专业测绘计算解决方案</p>
             </div>
           </div>
