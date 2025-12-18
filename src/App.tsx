@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import './App.css';
 
 // 类型定义
@@ -12,6 +12,26 @@ interface HistoryItem {
   inputs?: {[k:string]:string};
 }
 interface TraverseStation { angle: number; distance: number; }
+
+// 输入框组件 - 在App外部定义以避免重新渲染导致失焦
+const InputField = memo(({ label, k, value, onChange, placeholder }: {
+  label: string;
+  k: string;
+  value: string;
+  onChange: (k: string, v: string) => void;
+  placeholder?: string;
+}) => (
+  <div className="input-row">
+    <label>{label}</label>
+    <input 
+      type="text" 
+      inputMode="decimal" 
+      value={value} 
+      onChange={e => onChange(k, e.target.value)} 
+      placeholder={placeholder || '0'}
+    />
+  </div>
+));
 
 // 主题配色
 const Themes: {[k:string]:{name:string;bg:string;card:string;primary:string;text:string;border:string}} = {
@@ -501,6 +521,7 @@ function App() {
   const [surveyType, setSurveyType] = useState('forward');
   const [inputs, setInputs] = useState<{[k:string]:string}>({});
   const [result, setResult] = useState('');
+  const [surveySearch, setSurveySearch] = useState('');
   
   // 获取当前主题配色
   const currentTheme = Themes[theme] || Themes['dark'];
@@ -732,6 +753,64 @@ function App() {
           r = `【后方交会结果】\nXp = ${fmt(p.x)}\nYp = ${fmt(p.y)}`;
           break;
         }
+        case 'side_shot': {
+          // 支导线/极坐标计算 - 多点连续计算
+          const pts: {name:string;x:number;y:number}[] = [{name:'起点',x:getN('ssx0'),y:getN('ssy0')}];
+          let currX = getN('ssx0'), currY = getN('ssy0'), currAz = getN('ssaz0');
+          let output = '【支导线/极坐标计算】\n\n起始点: X=' + fmt(currX) + ', Y=' + fmt(currY) + '\n起始方位角: ' + fmt(currAz) + '°\n\n计算结果:';
+          for(let i=1; i<=6; i++) {
+            const ang = inputs[`ssang${i}`], dist = inputs[`ssdist${i}`];
+            if(ang && dist) {
+              currAz = Survey.normalizeAz(currAz + parseFloat(ang) - 180);
+              const d = parseFloat(dist);
+              currX += d * Math.cos(Survey.degToRad(currAz));
+              currY += d * Math.sin(Survey.degToRad(currAz));
+              pts.push({name:'P'+i, x:currX, y:currY});
+              output += '\n\n点P' + i + ':\n  方位角 = ' + fmt(currAz) + '°\n  X = ' + fmt(currX) + ' m\n  Y = ' + fmt(currY) + ' m';
+            }
+          }
+          r = pts.length > 1 ? output : '请输入观测数据';
+          break;
+        }
+        case 'transition_curve': {
+          // 缓和曲线计算
+          const Ls = getN('tcLs'), R = getN('tcR'), alpha = getN('tcAlpha');
+          const alphaRad = Survey.degToRad(Math.abs(alpha));
+          const beta0 = Ls / (2 * R); // 缓和曲线角
+          const m = Ls / 2 - Math.pow(Ls, 3) / (240 * R * R); // 切线增长
+          const p = Ls * Ls / (24 * R); // 内移值
+          const Lc = R * (alphaRad - 2 * beta0); // 圆曲线长
+          const L = Lc + 2 * Ls; // 曲线总长
+          const Th = (R + p) * Math.tan(alphaRad / 2) + m; // 切线长
+          const Eh = (R + p) / Math.cos(alphaRad / 2) - R; // 外距
+          r = '【缓和曲线计算】\n\n输入:\n缓和曲线长 Ls = ' + fmt(Ls) + ' m\n圆曲线半径 R = ' + fmt(R) + ' m\n转角 α = ' + fmt(alpha) + '°\n\n计算结果:\n缓和曲线角 β0 = ' + fmt(Survey.radToDeg(beta0)) + '°\n内移值 p = ' + fmt(p) + ' m\n切线增长 m = ' + fmt(m) + ' m\n圆曲线长 Lc = ' + fmt(Lc) + ' m\n曲线总长 L = ' + fmt(L) + ' m\n切线长 Th = ' + fmt(Th) + ' m\n外距 Eh = ' + fmt(Eh) + ' m';
+          break;
+        }
+        case 'vertical_curve': {
+          // 竖曲线计算
+          const i1 = getN('vci1') / 100, i2 = getN('vci2') / 100; // 纵坡(转为小数)
+          const R = getN('vcR');
+          const omega = i2 - i1; // 坡差
+          const T = Math.abs(omega) * R / 2; // 切线长
+          const L = Math.abs(omega) * R; // 曲线长
+          const E = T * T / (2 * R); // 外距
+          const curveType = omega > 0 ? '凹形' : '凸形';
+          r = '【竖曲线计算】\n\n输入:\n前坡 i1 = ' + getN('vci1') + '%\n后坡 i2 = ' + getN('vci2') + '%\n竖曲线半径 R = ' + fmt(R) + ' m\n\n计算结果:\n曲线类型: ' + curveType + '竖曲线\n坡差 ω = ' + fmt(omega*100) + '%\n切线长 T = ' + fmt(T) + ' m\n曲线长 L = ' + fmt(L) + ' m\n外距 E = ' + fmt(E) + ' m';
+          break;
+        }
+        case 'slope': {
+          // 边坡放样
+          const H = getN('slH'); // 设计高程
+          const H0 = getN('slH0'); // 地面高程
+          const W = getN('slW'); // 路基宽度
+          const m1 = getN('slM'); // 边坡率 1:m
+          const dH = H - H0;
+          const isFill = dH > 0; // 填方还是挖方
+          const slopeW = Math.abs(dH) * m1; // 边坡水平宽度
+          const edgeX = W / 2 + slopeW; // 坡脚点距中线距离
+          r = '【边坡放样计算】\n\n输入:\n设计高程 H = ' + fmt(H) + ' m\n地面高程 H0 = ' + fmt(H0) + ' m\n路基宽度 W = ' + fmt(W) + ' m\n边坡率 1:' + fmt(m1) + '\n\n计算结果:\n施工类型: ' + (isFill ? '填方' : '挖方') + '\n高差 = ' + fmt(Math.abs(dH)) + ' m\n边坡水平宽度 = ' + fmt(slopeW) + ' m\n坡脚距中线距离 = ' + fmt(edgeX) + ' m\n左坡脚 X偏移 = -' + fmt(edgeX) + ' m\n右坡脚 X偏移 = +' + fmt(edgeX) + ' m';
+          break;
+        }
         case 'area': {
           const pts: Point[] = [];
           for(let i=1; i<=10; i++) {
@@ -914,6 +993,7 @@ function App() {
     { id: 'inverse', name: '坐标反算', icon: '📏' },
     { id: 'forward_intersect', name: '前方交会', icon: '🔺' },
     { id: 'resection', name: '后方交会', icon: '🎯' },
+    { id: 'side_shot', name: '支导线/极坐标', icon: '📌' },
     { id: 'area', name: '面积计算', icon: '⬛' },
     { id: 'closed_traverse', name: '闭合导线', icon: '🔄' },
     { id: 'attached_traverse', name: '附合导线', icon: '➡️' },
@@ -927,57 +1007,66 @@ function App() {
     { id: 'transform4', name: '四参数转换', icon: '🔄' },
     { id: 'transform7', name: '七参数转换', icon: '🔀' },
     { id: 'coord_sys', name: '坐标系转换', icon: '🔁' },
-    { id: 'curve', name: '曲线计算', icon: '🛣️' },
+    { id: 'curve', name: '圆曲线计算', icon: '🛣️' },
+    { id: 'transition_curve', name: '缓和曲线', icon: '🌀' },
+    { id: 'vertical_curve', name: '竖曲线计算', icon: '📉' },
     { id: 'earthwork', name: '土方计算', icon: '🏗️' },
+    { id: 'slope', name: '边坡放样', icon: '⛰️' },
   ];
   
-  const InputField = ({label, k, placeholder}: {label: string; k: string; placeholder?: string}) => (
-    <div className="input-row">
-      <label>{label}</label>
-      <input type="text" inputMode="decimal" value={inputs[k]||''} onChange={e=>inp(k,e.target.value)} placeholder={placeholder||'0'} />
-    </div>
-  );
+  // 使用useCallback缓存输入函数，避免重新渲染
+  const handleInputChange = useCallback((k: string, v: string) => {
+    setInputs(prev => ({...prev, [k]: v}));
+  }, []);
 
   const renderSurveyInputs = () => {
     switch(surveyType) {
       case 'forward':
-        return <><InputField label="起点X" k="x0"/><InputField label="起点Y" k="y0"/><InputField label="方位角(°)" k="az"/><InputField label="距离(m)" k="dist"/></>;
+        return <><InputField label="起点X" k="x0" value={inputs['x0']||''} onChange={handleInputChange}/><InputField label="起点Y" k="y0" value={inputs['y0']||''} onChange={handleInputChange}/><InputField label="方位角(°)" k="az" value={inputs['az']||''} onChange={handleInputChange}/><InputField label="距离(m)" k="dist" value={inputs['dist']||''} onChange={handleInputChange}/></>;
       case 'inverse':
-        return <><InputField label="点1 X" k="x1"/><InputField label="点1 Y" k="y1"/><InputField label="点2 X" k="x2"/><InputField label="点2 Y" k="y2"/></>;
+        return <><InputField label="点1 X" k="x1" value={inputs['x1']||''} onChange={handleInputChange}/><InputField label="点1 Y" k="y1" value={inputs['y1']||''} onChange={handleInputChange}/><InputField label="点2 X" k="x2" value={inputs['x2']||''} onChange={handleInputChange}/><InputField label="点2 Y" k="y2" value={inputs['y2']||''} onChange={handleInputChange}/></>;
       case 'forward_intersect':
-        return <><InputField label="A点X" k="xa"/><InputField label="A点Y" k="ya"/><InputField label="B点X" k="xb"/><InputField label="B点Y" k="yb"/><InputField label="∠PAB(°)" k="angA"/><InputField label="∠PBA(°)" k="angB"/></>;
+        return <><InputField label="A点X" k="xa" value={inputs['xa']||''} onChange={handleInputChange}/><InputField label="A点Y" k="ya" value={inputs['ya']||''} onChange={handleInputChange}/><InputField label="B点X" k="xb" value={inputs['xb']||''} onChange={handleInputChange}/><InputField label="B点Y" k="yb" value={inputs['yb']||''} onChange={handleInputChange}/><InputField label="∠PAB(°)" k="angA" value={inputs['angA']||''} onChange={handleInputChange}/><InputField label="∠PBA(°)" k="angB" value={inputs['angB']||''} onChange={handleInputChange}/></>;
       case 'resection':
-        return <><InputField label="A点X" k="xa"/><InputField label="A点Y" k="ya"/><InputField label="B点X" k="xb"/><InputField label="B点Y" k="yb"/><InputField label="C点X" k="xc"/><InputField label="C点Y" k="yc"/><InputField label="∠APB(°)" k="alpha"/><InputField label="∠BPC(°)" k="beta"/></>;
+        return <><InputField label="A点X" k="xa" value={inputs['xa']||''} onChange={handleInputChange}/><InputField label="A点Y" k="ya" value={inputs['ya']||''} onChange={handleInputChange}/><InputField label="B点X" k="xb" value={inputs['xb']||''} onChange={handleInputChange}/><InputField label="B点Y" k="yb" value={inputs['yb']||''} onChange={handleInputChange}/><InputField label="C点X" k="xc" value={inputs['xc']||''} onChange={handleInputChange}/><InputField label="C点Y" k="yc" value={inputs['yc']||''} onChange={handleInputChange}/><InputField label="∠APB(°)" k="alpha" value={inputs['alpha']||''} onChange={handleInputChange}/><InputField label="∠BPC(°)" k="beta" value={inputs['beta']||''} onChange={handleInputChange}/></>;
+      case 'side_shot':
+        return <><InputField label="起点X" k="ssx0" value={inputs['ssx0']||''} onChange={handleInputChange}/><InputField label="起点Y" k="ssy0" value={inputs['ssy0']||''} onChange={handleInputChange}/><InputField label="起始方位角(°)" k="ssaz0" value={inputs['ssaz0']||''} onChange={handleInputChange}/><div className="table-header"><span>点</span><span>水平角(°)</span><span>距离(m)</span></div>{[1,2,3,4,5,6].map(i=><div key={i} className="table-row"><span>P{i}</span><input type="text" inputMode="decimal" value={inputs[`ssang${i}`]||''} onChange={e=>handleInputChange(`ssang${i}`,e.target.value)} placeholder="角度"/><input type="text" inputMode="decimal" value={inputs[`ssdist${i}`]||''} onChange={e=>handleInputChange(`ssdist${i}`,e.target.value)} placeholder="距离"/></div>)}</>;
       case 'area':
-        return <div className="area-inputs">{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="point-row"><span>P{i}</span><input type="text" inputMode="decimal" value={inputs[`ax${i}`]||''} onChange={e=>inp(`ax${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`ay${i}`]||''} onChange={e=>inp(`ay${i}`,e.target.value)} placeholder="Y"/></div>)}</div>;
+        return <div className="area-inputs">{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="point-row"><span>P{i}</span><input type="text" inputMode="decimal" value={inputs[`ax${i}`]||''} onChange={e=>handleInputChange(`ax${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`ay${i}`]||''} onChange={e=>handleInputChange(`ay${i}`,e.target.value)} placeholder="Y"/></div>)}</div>;
       case 'closed_traverse':
-        return <><InputField label="起点X" k="tx0"/><InputField label="起点Y" k="ty0"/><InputField label="起始方位角(°)" k="taz0"/><div className="table-header"><span>测站</span><span>水平角(°)</span><span>边长(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`tang${i}`]||''} onChange={e=>inp(`tang${i}`,e.target.value)} placeholder="角度"/><input type="text" inputMode="decimal" value={inputs[`tdist${i}`]||''} onChange={e=>inp(`tdist${i}`,e.target.value)} placeholder="边长"/></div>)}</>;
+        return <><InputField label="起点X" k="tx0" value={inputs['tx0']||''} onChange={handleInputChange}/><InputField label="起点Y" k="ty0" value={inputs['ty0']||''} onChange={handleInputChange}/><InputField label="起始方位角(°)" k="taz0" value={inputs['taz0']||''} onChange={handleInputChange}/><div className="table-header"><span>测站</span><span>水平角(°)</span><span>边长(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`tang${i}`]||''} onChange={e=>handleInputChange(`tang${i}`,e.target.value)} placeholder="角度"/><input type="text" inputMode="decimal" value={inputs[`tdist${i}`]||''} onChange={e=>handleInputChange(`tdist${i}`,e.target.value)} placeholder="边长"/></div>)}</>;
       case 'attached_traverse':
-        return <><InputField label="起点X" k="atx0"/><InputField label="起点Y" k="aty0"/><InputField label="起始方位角(°)" k="ataz0"/><InputField label="终点X" k="atxe"/><InputField label="终点Y" k="atye"/><InputField label="终止方位角(°)" k="ataze"/><div className="table-header"><span>测站</span><span>水平角(°)</span><span>边长(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`atang${i}`]||''} onChange={e=>inp(`atang${i}`,e.target.value)} placeholder="角度"/><input type="text" inputMode="decimal" value={inputs[`atdist${i}`]||''} onChange={e=>inp(`atdist${i}`,e.target.value)} placeholder="边长"/></div>)}</>;
+        return <><InputField label="起点X" k="atx0" value={inputs['atx0']||''} onChange={handleInputChange}/><InputField label="起点Y" k="aty0" value={inputs['aty0']||''} onChange={handleInputChange}/><InputField label="起始方位角(°)" k="ataz0" value={inputs['ataz0']||''} onChange={handleInputChange}/><InputField label="终点X" k="atxe" value={inputs['atxe']||''} onChange={handleInputChange}/><InputField label="终点Y" k="atye" value={inputs['atye']||''} onChange={handleInputChange}/><InputField label="终止方位角(°)" k="ataze" value={inputs['ataze']||''} onChange={handleInputChange}/><div className="table-header"><span>测站</span><span>水平角(°)</span><span>边长(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`atang${i}`]||''} onChange={e=>handleInputChange(`atang${i}`,e.target.value)} placeholder="角度"/><input type="text" inputMode="decimal" value={inputs[`atdist${i}`]||''} onChange={e=>handleInputChange(`atdist${i}`,e.target.value)} placeholder="边长"/></div>)}</>;
       case 'level_closed':
-        return <><InputField label="起点高程(m)" k="lh0"/><div className="table-header"><span>段</span><span>高差(m)</span><span>距离(km)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`ldiff${i}`]||''} onChange={e=>inp(`ldiff${i}`,e.target.value)} placeholder="高差"/><input type="text" inputMode="decimal" value={inputs[`ldist${i}`]||''} onChange={e=>inp(`ldist${i}`,e.target.value)} placeholder="距离"/></div>)}</>;
+        return <><InputField label="起点高程(m)" k="lh0" value={inputs['lh0']||''} onChange={handleInputChange}/><div className="table-header"><span>段</span><span>高差(m)</span><span>距离(km)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`ldiff${i}`]||''} onChange={e=>handleInputChange(`ldiff${i}`,e.target.value)} placeholder="高差"/><input type="text" inputMode="decimal" value={inputs[`ldist${i}`]||''} onChange={e=>handleInputChange(`ldist${i}`,e.target.value)} placeholder="距离"/></div>)}</>;
       case 'level_attached':
-        return <><InputField label="起点高程(m)" k="alh0"/><InputField label="终点高程(m)" k="alhe"/><div className="table-header"><span>段</span><span>高差(m)</span><span>距离(km)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`aldiff${i}`]||''} onChange={e=>inp(`aldiff${i}`,e.target.value)} placeholder="高差"/><input type="text" inputMode="decimal" value={inputs[`aldist${i}`]||''} onChange={e=>inp(`aldist${i}`,e.target.value)} placeholder="距离"/></div>)}</>;
+        return <><InputField label="起点高程(m)" k="alh0" value={inputs['alh0']||''} onChange={handleInputChange}/><InputField label="终点高程(m)" k="alhe" value={inputs['alhe']||''} onChange={handleInputChange}/><div className="table-header"><span>段</span><span>高差(m)</span><span>距离(km)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`aldiff${i}`]||''} onChange={e=>handleInputChange(`aldiff${i}`,e.target.value)} placeholder="高差"/><input type="text" inputMode="decimal" value={inputs[`aldist${i}`]||''} onChange={e=>handleInputChange(`aldist${i}`,e.target.value)} placeholder="距离"/></div>)}</>;
       case 'gauss_forward':
-        return <><InputField label="纬度B(°)" k="glat" placeholder="如 30.5"/><InputField label="经度L(°)" k="glon" placeholder="如 114.3"/><InputField label="中央子午线(°)" k="gcm" placeholder="自动计算"/></>;
+        return <><InputField label="纬度B(°)" k="glat" value={inputs['glat']||''} onChange={handleInputChange} placeholder="如 30.5"/><InputField label="经度L(°)" k="glon" value={inputs['glon']||''} onChange={handleInputChange} placeholder="如 114.3"/><InputField label="中央子午线(°)" k="gcm" value={inputs['gcm']||''} onChange={handleInputChange} placeholder="自动计算"/></>;
       case 'gauss_inverse':
-        return <><InputField label="X坐标(m)" k="gix"/><InputField label="Y坐标(m)" k="giy"/><InputField label="中央子午线(°)" k="gicm"/></>;
+        return <><InputField label="X坐标(m)" k="gix" value={inputs['gix']||''} onChange={handleInputChange}/><InputField label="Y坐标(m)" k="giy" value={inputs['giy']||''} onChange={handleInputChange}/><InputField label="中央子午线(°)" k="gicm" value={inputs['gicm']||''} onChange={handleInputChange}/></>;
       case 'transform4':
-        return <><div className="transform-header">公共点坐标（至少2个）</div><div className="table-header"><span>点</span><span>源X</span><span>源Y</span><span>目标X</span><span>目标Y</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row-4"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t4sx${i}`]||''} onChange={e=>inp(`t4sx${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`t4sy${i}`]||''} onChange={e=>inp(`t4sy${i}`,e.target.value)} placeholder="Y"/><input type="text" inputMode="decimal" value={inputs[`t4tx${i}`]||''} onChange={e=>inp(`t4tx${i}`,e.target.value)} placeholder="X'"/><input type="text" inputMode="decimal" value={inputs[`t4ty${i}`]||''} onChange={e=>inp(`t4ty${i}`,e.target.value)} placeholder="Y'"/></div>)}</>;
+        return <><div className="transform-header">公共点坐标（至少2个）</div><div className="table-header"><span>点</span><span>源X</span><span>源Y</span><span>目标X</span><span>目标Y</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row-4"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t4sx${i}`]||''} onChange={e=>handleInputChange(`t4sx${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`t4sy${i}`]||''} onChange={e=>handleInputChange(`t4sy${i}`,e.target.value)} placeholder="Y"/><input type="text" inputMode="decimal" value={inputs[`t4tx${i}`]||''} onChange={e=>handleInputChange(`t4tx${i}`,e.target.value)} placeholder="X'"/><input type="text" inputMode="decimal" value={inputs[`t4ty${i}`]||''} onChange={e=>handleInputChange(`t4ty${i}`,e.target.value)} placeholder="Y'"/></div>)}</>;
       case 'curve':
-        return <><InputField label="圆曲线半径R(m)" k="cR"/><InputField label="偏角α(°)" k="cAlpha"/></>;
+        return <><InputField label="圆曲线半径R(m)" k="cR" value={inputs['cR']||''} onChange={handleInputChange}/><InputField label="偏角α(°)" k="cAlpha" value={inputs['cAlpha']||''} onChange={handleInputChange}/></>;
+      case 'transition_curve':
+        return <><InputField label="缓和曲线长 Ls(m)" k="tcLs" value={inputs['tcLs']||''} onChange={handleInputChange} placeholder="如 100"/><InputField label="圆曲线半径 R(m)" k="tcR" value={inputs['tcR']||''} onChange={handleInputChange} placeholder="如 500"/><InputField label="转角 α(°)" k="tcAlpha" value={inputs['tcAlpha']||''} onChange={handleInputChange} placeholder="左转为负"/></>;
+      case 'vertical_curve':
+        return <><InputField label="前坡 i1(%)" k="vci1" value={inputs['vci1']||''} onChange={handleInputChange} placeholder="上坡为正"/><InputField label="后坡 i2(%)" k="vci2" value={inputs['vci2']||''} onChange={handleInputChange} placeholder="下坡为负"/><InputField label="竖曲线半径 R(m)" k="vcR" value={inputs['vcR']||''} onChange={handleInputChange} placeholder="如 5000"/></>;
+      case 'slope':
+        return <><InputField label="设计高程 H(m)" k="slH" value={inputs['slH']||''} onChange={handleInputChange}/><InputField label="地面高程 H0(m)" k="slH0" value={inputs['slH0']||''} onChange={handleInputChange}/><InputField label="路基宽度 W(m)" k="slW" value={inputs['slW']||''} onChange={handleInputChange} placeholder="单幅宽度"/><InputField label="边坡率 1:m" k="slM" value={inputs['slM']||''} onChange={handleInputChange} placeholder="如 1.5"/></>;
       case 'earthwork':
-        return <><div className="table-header"><span>断面</span><span>面积(m²)</span><span>间距(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`ewa${i}`]||''} onChange={e=>inp(`ewa${i}`,e.target.value)} placeholder="面积"/><input type="text" inputMode="decimal" value={inputs[`ewd${i}`]||''} onChange={e=>inp(`ewd${i}`,e.target.value)} placeholder="间距"/></div>)}</>;
+        return <><div className="table-header"><span>断面</span><span>面积(m²)</span><span>间距(m)</span></div>{[1,2,3,4,5,6,7,8,9,10].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`ewa${i}`]||''} onChange={e=>handleInputChange(`ewa${i}`,e.target.value)} placeholder="面积"/><input type="text" inputMode="decimal" value={inputs[`ewd${i}`]||''} onChange={e=>handleInputChange(`ewd${i}`,e.target.value)} placeholder="间距"/></div>)}</>;
       case 'gauss_proj':
-        return <><div className="select-row"><label>椭球</label><select value={inputs['gpellip']||'CGCS2000'} onChange={e=>inp('gpellip',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="WGS84">WGS84</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option></select></div><div className="select-row"><label>带宽</label><select value={inputs['gpzw']||'6'} onChange={e=>inp('gpzw',e.target.value)}><option value="6">6°带</option><option value="3">3°带</option></select></div><InputField label="纬度B(°)" k="gpB" placeholder="如 30.5"/><InputField label="经度L(°)" k="gpL" placeholder="如 114.3"/><InputField label="中央子午线(°)" k="gpL0" placeholder="自动计算"/></>;
+        return <><div className="select-row"><label>椭球</label><select value={inputs['gpellip']||'CGCS2000'} onChange={e=>handleInputChange('gpellip',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="WGS84">WGS84</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option></select></div><div className="select-row"><label>带宽</label><select value={inputs['gpzw']||'6'} onChange={e=>handleInputChange('gpzw',e.target.value)}><option value="6">6°带</option><option value="3">3°带</option></select></div><InputField label="纬度B(°)" k="gpB" value={inputs['gpB']||''} onChange={handleInputChange} placeholder="如 30.5"/><InputField label="经度L(°)" k="gpL" value={inputs['gpL']||''} onChange={handleInputChange} placeholder="如 114.3"/><InputField label="中央子午线(°)" k="gpL0" value={inputs['gpL0']||''} onChange={handleInputChange} placeholder="自动计算"/></>;
       case 'utm':
-        return <><div className="select-row"><label>椭球</label><select value={inputs['utmellip']||'WGS84'} onChange={e=>inp('utmellip',e.target.value)}><option value="WGS84">WGS84</option><option value="CGCS2000">CGCS2000</option></select></div><InputField label="纬度B(°)" k="utmB" placeholder="如 30.5"/><InputField label="经度L(°)" k="utmL" placeholder="如 114.3"/></>;
+        return <><div className="select-row"><label>椭球</label><select value={inputs['utmellip']||'WGS84'} onChange={e=>handleInputChange('utmellip',e.target.value)}><option value="WGS84">WGS84</option><option value="CGCS2000">CGCS2000</option></select></div><InputField label="纬度B(°)" k="utmB" value={inputs['utmB']||''} onChange={handleInputChange} placeholder="如 30.5"/><InputField label="经度L(°)" k="utmL" value={inputs['utmL']||''} onChange={handleInputChange} placeholder="如 114.3"/></>;
       case 'blh_xyz':
-        return <><div className="select-row"><label>椭球</label><select value={inputs['blhellip']||'CGCS2000'} onChange={e=>inp('blhellip',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="WGS84">WGS84</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option></select></div><div className="select-row"><label>转换方向</label><select value={inputs['blhmode']||'blh2xyz'} onChange={e=>inp('blhmode',e.target.value)}><option value="blh2xyz">BLH→XYZ</option><option value="xyz2blh">XYZ→BLH</option></select></div>{(inputs['blhmode']||'blh2xyz')==='blh2xyz'?<><InputField label="纬度B(°)" k="blhB"/><InputField label="经度L(°)" k="blhL"/><InputField label="大地高H(m)" k="blhH"/></>:<><InputField label="X(m)" k="xyzX"/><InputField label="Y(m)" k="xyzY"/><InputField label="Z(m)" k="xyzZ"/></>}</>;
+        return <><div className="select-row"><label>椭球</label><select value={inputs['blhellip']||'CGCS2000'} onChange={e=>handleInputChange('blhellip',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="WGS84">WGS84</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option></select></div><div className="select-row"><label>转换方向</label><select value={inputs['blhmode']||'blh2xyz'} onChange={e=>handleInputChange('blhmode',e.target.value)}><option value="blh2xyz">BLH→XYZ</option><option value="xyz2blh">XYZ→BLH</option></select></div>{(inputs['blhmode']||'blh2xyz')==='blh2xyz'?<><InputField label="纬度B(°)" k="blhB" value={inputs['blhB']||''} onChange={handleInputChange}/><InputField label="经度L(°)" k="blhL" value={inputs['blhL']||''} onChange={handleInputChange}/><InputField label="大地高H(m)" k="blhH" value={inputs['blhH']||''} onChange={handleInputChange}/></>:<><InputField label="X(m)" k="xyzX" value={inputs['xyzX']||''} onChange={handleInputChange}/><InputField label="Y(m)" k="xyzY" value={inputs['xyzY']||''} onChange={handleInputChange}/><InputField label="Z(m)" k="xyzZ" value={inputs['xyzZ']||''} onChange={handleInputChange}/></>}</>;
       case 'transform7':
-        return <><div className="select-row"><label>模式</label><select value={inputs['t7mode']||'calc'} onChange={e=>inp('t7mode',e.target.value)}><option value="calc">参数求解</option><option value="apply">参数转换</option></select></div>{(inputs['t7mode']||'calc')==='calc'?<><div className="transform-header">公共点坐标（至少3个）- 空间直角坐标</div><div className="table-header"><span>点</span><span>源X</span><span>源Y</span><span>源Z</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t7sX${i}`]||''} onChange={e=>inp(`t7sX${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`t7sY${i}`]||''} onChange={e=>inp(`t7sY${i}`,e.target.value)} placeholder="Y"/><input type="text" inputMode="decimal" value={inputs[`t7sZ${i}`]||''} onChange={e=>inp(`t7sZ${i}`,e.target.value)} placeholder="Z"/></div>)}<div className="table-header"><span>点</span><span>目X</span><span>目Y</span><span>目Z</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t7tX${i}`]||''} onChange={e=>inp(`t7tX${i}`,e.target.value)} placeholder="X'"/><input type="text" inputMode="decimal" value={inputs[`t7tY${i}`]||''} onChange={e=>inp(`t7tY${i}`,e.target.value)} placeholder="Y'"/><input type="text" inputMode="decimal" value={inputs[`t7tZ${i}`]||''} onChange={e=>inp(`t7tZ${i}`,e.target.value)} placeholder="Z'"/></div>)}</>:<><div className="transform-header">布尔萨七参数</div><InputField label="ΔX(m)" k="t7dx"/><InputField label="ΔY(m)" k="t7dy"/><InputField label="ΔZ(m)" k="t7dz"/><InputField label="εx(角秒)" k="t7rx"/><InputField label="εy(角秒)" k="t7ry"/><InputField label="εz(角秒)" k="t7rz"/><InputField label="m(ppm)" k="t7m"/><div className="transform-header">待转换点</div><InputField label="X(m)" k="t7X"/><InputField label="Y(m)" k="t7Y"/><InputField label="Z(m)" k="t7Z"/></>}</>;
+        return <><div className="select-row"><label>模式</label><select value={inputs['t7mode']||'calc'} onChange={e=>handleInputChange('t7mode',e.target.value)}><option value="calc">参数求解</option><option value="apply">参数转换</option></select></div>{(inputs['t7mode']||'calc')==='calc'?<><div className="transform-header">公共点坐标（至少3个）- 空间直角坐标</div><div className="table-header"><span>点</span><span>源X</span><span>源Y</span><span>源Z</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t7sX${i}`]||''} onChange={e=>handleInputChange(`t7sX${i}`,e.target.value)} placeholder="X"/><input type="text" inputMode="decimal" value={inputs[`t7sY${i}`]||''} onChange={e=>handleInputChange(`t7sY${i}`,e.target.value)} placeholder="Y"/><input type="text" inputMode="decimal" value={inputs[`t7sZ${i}`]||''} onChange={e=>handleInputChange(`t7sZ${i}`,e.target.value)} placeholder="Z"/></div>)}<div className="table-header"><span>点</span><span>目X</span><span>目Y</span><span>目Z</span></div>{[1,2,3,4,5].map(i=><div key={i} className="table-row"><span>{i}</span><input type="text" inputMode="decimal" value={inputs[`t7tX${i}`]||''} onChange={e=>handleInputChange(`t7tX${i}`,e.target.value)} placeholder="X'"/><input type="text" inputMode="decimal" value={inputs[`t7tY${i}`]||''} onChange={e=>handleInputChange(`t7tY${i}`,e.target.value)} placeholder="Y'"/><input type="text" inputMode="decimal" value={inputs[`t7tZ${i}`]||''} onChange={e=>handleInputChange(`t7tZ${i}`,e.target.value)} placeholder="Z'"/></div>)}</>:<><div className="transform-header">布尔萨七参数</div><InputField label="ΔX(m)" k="t7dx" value={inputs['t7dx']||''} onChange={handleInputChange}/><InputField label="ΔY(m)" k="t7dy" value={inputs['t7dy']||''} onChange={handleInputChange}/><InputField label="ΔZ(m)" k="t7dz" value={inputs['t7dz']||''} onChange={handleInputChange}/><InputField label="εx(角秒)" k="t7rx" value={inputs['t7rx']||''} onChange={handleInputChange}/><InputField label="εy(角秒)" k="t7ry" value={inputs['t7ry']||''} onChange={handleInputChange}/><InputField label="εz(角秒)" k="t7rz" value={inputs['t7rz']||''} onChange={handleInputChange}/><InputField label="m(ppm)" k="t7m" value={inputs['t7m']||''} onChange={handleInputChange}/><div className="transform-header">待转换点</div><InputField label="X(m)" k="t7X" value={inputs['t7X']||''} onChange={handleInputChange}/><InputField label="Y(m)" k="t7Y" value={inputs['t7Y']||''} onChange={handleInputChange}/><InputField label="Z(m)" k="t7Z" value={inputs['t7Z']||''} onChange={handleInputChange}/></>}</>;
       case 'coord_sys':
-        return <><div className="select-row"><label>源坐标系</label><select value={inputs['csSrc']||'WGS84'} onChange={e=>inp('csSrc',e.target.value)}><option value="WGS84">WGS84</option><option value="CGCS2000">CGCS2000</option></select></div><div className="select-row"><label>目标坐标系</label><select value={inputs['csTgt']||'CGCS2000'} onChange={e=>inp('csTgt',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option></select></div><InputField label="纬度B(°)" k="csB"/><InputField label="经度L(°)" k="csL"/><InputField label="大地高H(m)" k="csH"/></>;
+        return <><div className="select-row"><label>源坐标系</label><select value={inputs['csSrc']||'WGS84'} onChange={e=>handleInputChange('csSrc',e.target.value)}><option value="WGS84">WGS84</option><option value="CGCS2000">CGCS2000</option></select></div><div className="select-row"><label>目标坐标系</label><select value={inputs['csTgt']||'CGCS2000'} onChange={e=>handleInputChange('csTgt',e.target.value)}><option value="CGCS2000">CGCS2000</option><option value="BJ54">北京54</option><option value="XIAN80">西安80</option></select></div><InputField label="纬度B(°)" k="csB" value={inputs['csB']||''} onChange={handleInputChange}/><InputField label="经度L(°)" k="csL" value={inputs['csL']||''} onChange={handleInputChange}/><InputField label="大地高H(m)" k="csH" value={inputs['csH']||''} onChange={handleInputChange}/></>;
       default: return null;
     }
   };
@@ -1142,9 +1231,26 @@ function App() {
         {/* 测绘计算 */}
         {tab === 'survey' && (
           <div className="survey-page">
+            <div className="survey-search">
+              <input 
+                type="text" 
+                placeholder="🔍 搜索计算类型..."
+                value={surveySearch}
+                onChange={e => setSurveySearch(e.target.value)}
+                style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}}
+              />
+            </div>
             <div className="type-selector">
-              <select value={surveyType} onChange={e=>{setSurveyType(e.target.value);setInputs({});setResult('');}}>
-                {surveyTypes.map(t => <option key={t.id} value={t.id}>{t.icon} {t.name}</option>)}
+              <select 
+                value={surveyType} 
+                onChange={e=>{setSurveyType(e.target.value);setInputs({});setResult('');}}
+                style={{background: currentTheme.card, color: currentTheme.text, borderColor: currentTheme.border}}
+              >
+                {surveyTypes.filter(t => 
+                  surveySearch === '' || 
+                  t.name.toLowerCase().includes(surveySearch.toLowerCase()) ||
+                  t.id.toLowerCase().includes(surveySearch.toLowerCase())
+                ).map(t => <option key={t.id} value={t.id}>{t.icon} {t.name}</option>)}
               </select>
             </div>
             <div className="survey-form">
